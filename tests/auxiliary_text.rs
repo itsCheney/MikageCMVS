@@ -1400,3 +1400,82 @@ fn exhausted_cells_leave_glyphs_detached_and_cells_must_fit_the_atlas() {
         assert!(messages.advance_auxiliary_motion(16, &mut scene).is_err());
     }
 }
+
+#[test]
+fn pixel_measurement_reports_widths_in_pixels_with_the_2017_slots() {
+    // あいうえ。 fit (。 stays), か wraps, \n starts line 3 with two half-width bytes.
+    let text = [KANA, b"\\nAB"].concat();
+    let mut calls = AREA.to_vec();
+    calls.push((0x23bb, &[7, 1]));
+    let script = content_script(&calls, &text);
+    let mut vm = Machine::new(&script).unwrap();
+    let mut messages = MessageHost::default();
+    run_calls(&mut vm, &mut messages, 3);
+    for i in 0..7 {
+        vm.state_mut().set_system_integer(i, 70 + i).unwrap();
+    }
+    run(&mut vm, &mut messages);
+    assert_eq!(vm.stack().len_bytes(), 0);
+    // Five 26-pixel cells, three lines, two 14-pixel half cells.
+    for (i, value) in [(0, 1), (1, 130), (2, 3), (4, 28)] {
+        assert_eq!(vm.state().system_integer(i), Some(value));
+    }
+    for i in [3, 5, 6] {
+        assert_eq!(vm.state().system_integer(i), Some(70 + i));
+    }
+}
+
+#[test]
+fn line_break_rules_replace_the_built_in_closing_marks() {
+    // Text at 1; its terminator doubles as the empty set and 。 follows it.
+    let mut segment = [KANA, b"\\nAB"].concat();
+    let empty = segment.len() as u32 + 1;
+    segment.push(0);
+    let hanging = empty + 1;
+    segment.extend(b"\x81\x42");
+    for (set, expected) in [(empty, [3, 104, 28]), (hanging, [3, 130, 28])] {
+        let mut calls = AREA.to_vec();
+        let rules = [7, set, empty, 1];
+        let measure = [7, 1];
+        calls.push((0x23b8, &rules));
+        calls.push((0x23bb, &measure));
+        let script = content_script(&calls, &segment);
+        let mut vm = Machine::new(&script).unwrap();
+        let mut messages = MessageHost::default();
+        run_calls(&mut vm, &mut messages, 4);
+        assert_eq!(vm.stack().len_bytes(), 0);
+        run(&mut vm, &mut messages);
+        for (i, value) in [(1, expected[1]), (2, expected[0]), (4, expected[2])] {
+            assert_eq!(vm.state().system_integer(i), Some(value), "set {set}");
+        }
+    }
+    // The layout follows the rules too: without 。 in the set it starts line 2.
+    let mut calls = AREA.to_vec();
+    let rules = [7, empty, empty, 1];
+    calls.push((0x23b8, &rules));
+    calls.push((0x238b, &[7, 1]));
+    let script = content_script(&calls, &segment);
+    let mut vm = Machine::new(&script).unwrap();
+    let mut messages = MessageHost::default();
+    messages.set_record_output(true);
+    run_calls(&mut vm, &mut messages, 5);
+    let group = messages.auxiliary_text(7).unwrap();
+    let placed: Vec<(u16, [i32; 2])> = group.glyphs.iter().map(|g| (g.code, g.position)).collect();
+    assert_eq!(placed[4], (0x8142, [100, 80]));
+}
+
+#[test]
+fn rules_and_pixel_measurement_need_a_created_group() {
+    for (op, args) in [(0x23b8u16, &[6u32, 1, 1, 0][..]), (0x23bb, &[6, 1])] {
+        let mut calls = AREA.to_vec();
+        calls.push((op, args));
+        let script = content_script(&calls, b"x");
+        let mut vm = Machine::new(&script).unwrap();
+        let mut messages = MessageHost::default();
+        run_calls(&mut vm, &mut messages, 3);
+        pending(&mut vm);
+        let before = stack_words(&vm);
+        assert!(messages.try_handle(&mut vm).is_err());
+        assert_eq!(stack_words(&vm), before);
+    }
+}

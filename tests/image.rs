@@ -2226,3 +2226,18 @@ fn pixel_query_keeps_alpha_and_rejects_filtered_images() {
     assert_eq!(vm.pending_system().map(|p| p.1), Some(0x34));
     assert_eq!(vm.stack().len_bytes(), 16);
 }
+
+#[test]
+fn patch_pixels_take_the_size_and_alpha_of_the_game_image() {
+    // BGRA rows top down, swapped to RGBA; a 24-bit original keeps alpha off.
+    let raw = cmvs_rs::patch::replace_pixels(&opaque(), vec![1, 2, 3, 4, 5, 6, 7, 8]).unwrap();
+    let image = decode(&raw).unwrap().unwrap();
+    assert_eq!(
+        image,
+        DecodedImage {
+            pixels: RgbaImage::new(2, 1, vec![3, 2, 1, 4, 7, 6, 5, 8]).unwrap(),
+            alpha: false,
+        }
+    );
+    assert!(cmvs_rs::patch::replace_pixels(&opaque(), vec![0; 4]).is_err());
+}

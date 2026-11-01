@@ -185,13 +185,21 @@ fn image_layer<'a>(
     mask: Option<&'a MaskTransition>,
     inherited: Option<([f32; 2], [f32; 2])>,
 ) -> Result<Option<Layer<'a>>, FormatError> {
-    let [sx, sy, w, h] = [2, 3, 4, 5].map(|i| i64::from(words[i] as i16));
+    let [sx, sy, mut w, mut h] = [2, 3, 4, 5].map(|i| i64::from(words[i] as i16));
     if w <= 0 || h <= 0 || alpha <= 0 {
         return Ok(None);
     }
     let size = [image.pixels.width(), image.pixels.height()].map(i64::from);
-    if sx < 0 || sy < 0 || sx + w > size[0] || sy + h > size[1] {
+    if sx < 0 || sy < 0 {
         return Err(FormatError("scene source rectangle outside image"));
+    }
+    // Mikage: アオイトリ's menu reads a 60-row strip at y 970 of a 1280x1024 sheet.
+    // The part past the right or bottom edge is drawn transparent; the top-left
+    // anchor, and so every corner the transforms below compute, stays the same.
+    w = w.min(size[0] - sx);
+    h = h.min(size[1] - sy);
+    if w <= 0 || h <= 0 {
+        return Ok(None);
     }
     // The mask is the object's second texture; only the case where it covers the whole,
     // equally sized image texel for texel is modeled.

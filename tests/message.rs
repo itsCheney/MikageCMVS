@@ -4377,3 +4377,40 @@ fn font_objects_keep_their_face_glyphs_capture_it_and_the_dialog_refreshes_defau
     run(&mut vm, &mut messages, 1);
     assert_eq!(face(&messages, 9), b"New");
 }
+
+#[test]
+fn pixel_text_measurement_uses_cell_advances_with_the_byte_measurement_slots() {
+    for (bytes, wide, narrow, lines, last_wide, last_narrow) in [
+        (&b"abcd"[..], 0, 4, 1, 0, 4),
+        (&b"\x82\xa0\x82\xa2AB"[..], 2, 2, 1, 2, 2),
+        (&b"\x82\xa0\x82\xa2\\nx"[..], 2, 0, 2, 0, 1),
+    ] {
+        let mut code = vec![];
+        create(&mut code, 0, 7, [20, 540, 1280, 180]);
+        call(&mut code, 0x211d, &[0, 7]);
+        let mut data = bytes.to_vec();
+        data.push(0);
+        let script = script_with_text(&code, &data);
+        let mut vm = Machine::new(&script).unwrap();
+        let mut messages = MessageHost::default();
+        run(&mut vm, &mut messages, 1);
+        let text = messages.text(7).cloned().unwrap();
+        let size = text.glyph_size as u32;
+        let full = size + text.spacing[0] as u32;
+        let half = size / 2 + text.spacing[0] as u32;
+        run(&mut vm, &mut messages, 1);
+        for (slot, value) in [
+            (0, 1),
+            (1, wide * full + narrow * half),
+            (2, lines),
+            (4, last_wide * full + last_narrow * half),
+        ] {
+            assert_eq!(
+                vm.state().system_integer(slot),
+                Some(value),
+                "{bytes:?} slot {slot}"
+            );
+        }
+        assert_eq!(vm.stack().len_bytes(), 0);
+    }
+}

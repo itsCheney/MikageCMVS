@@ -330,9 +330,10 @@ pub struct Registry {
     contracts: BTreeMap<[u8; 32], ContractProof>,
 }
 
-const BUILTIN_PROFILES: [&str; 2] = [
+const BUILTIN_PROFILES: [&str; 3] = [
     include_str!("../profiles/cmvs-20160201.profile"),
     include_str!("../profiles/cmvs-20150405.profile"),
+    include_str!("../profiles/cmvs-20171129.profile"),
 ];
 const BUILTIN_GAMES: &str = include_str!("../profiles/games.txt");
 

@@ -143,6 +143,7 @@ pub struct Startup<'a> {
     save_info: SaveInfo,
     gesture: PointerGesture,
     message_flags: MessageFlags,
+    engine_flags: crate::engine_flags::EngineFlags,
     settings: crate::settings::SettingsHost,
     configuration: crate::settings::Configuration,
     messages: MessageHost,
@@ -173,9 +174,14 @@ impl<'a> Startup<'a> {
         virtual_tick: u32,
     ) -> Result<Self, Box<dyn Error>> {
         let mut machine = Machine::new(script)?;
-        if game.selection.profile.id == "cmvs-20160201" {
+        if matches!(
+            game.selection.profile.id.as_str(),
+            "cmvs-20160201" | "cmvs-20171129"
+        ) {
             // Verified PE zero-fill globals of the baseline build. Keep standalone
             // research VMs and other profiles unknown until separately verified.
+            // Mikage: the 2017 build (アオイトリ) keeps the baseline's global banks;
+            // its scripts read them before writing, as on the baseline.
             let state = machine.state_mut();
             state
                 .fill_integers(0, 4096, 0)
@@ -246,6 +252,7 @@ impl<'a> Startup<'a> {
             save_info: SaveInfo::default(),
             gesture: PointerGesture::default(),
             message_flags,
+            engine_flags: Default::default(),
             settings,
             messages: MessageHost::default(),
             history: HistoryHost::default(),
@@ -917,6 +924,7 @@ impl<'a> Startup<'a> {
             || self.gesture.try_handle(&mut self.machine)?
             || self.save_menu.try_handle_popup(&mut self.machine)?
             || self.message_flags.try_handle(&mut self.machine)?
+            || self.engine_flags.try_handle(&mut self.machine)?
             || self.settings.try_handle(&mut self.machine)?
             || self
                 .messages

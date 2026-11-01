@@ -55,6 +55,17 @@ impl Header {
     }
 }
 
+/// How a script file stores its segments.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Payload {
+    /// The game's own files: obfuscated LZSS.
+    Obfuscated,
+    /// LZSS without the byte obfuscation.
+    Plain,
+    /// Already decoded.
+    Unpacked,
+}
+
 #[derive(Debug, Clone)]
 pub struct Script {
     pub header: Header,
@@ -140,16 +151,21 @@ impl Script {
     }
 
     pub fn decode(raw: &[u8]) -> Result<Self, FormatError> {
-        Self::decode_with(raw, true)
+        Self::decode_with(raw, Payload::Obfuscated)
     }
 
     /// A script from a translation patch: patch tools often write the LZSS
     /// payload without the byte obfuscation; the engine's hook reads either.
+    /// The Longinus hook stores scripts already decoded: plain segments after the
+    /// header, whose compressed size still names the original LZSS payload. Its
+    /// files may end a couple of bytes short; the original allocation is zeroed.
     pub fn decode_patch(raw: &[u8]) -> Result<Self, FormatError> {
-        Self::decode_with(raw, false).or_else(|_| Self::decode_with(raw, true))
+        Self::decode_with(raw, Payload::Plain)
+            .or_else(|_| Self::decode_with(raw, Payload::Obfuscated))
+            .or_else(|_| Self::decode_with(raw, Payload::Unpacked))
     }
 
-    fn decode_with(raw: &[u8], obfuscated: bool) -> Result<Self, FormatError> {
+    fn decode_with(raw: &[u8], kind: Payload) -> Result<Self, FormatError> {
         let header = Header::parse(raw)?;
         let total = header.segment_size();
         if total > MAX_PAYLOAD as u64 || u64::from(header.decoded_size) > MAX_PAYLOAD as u64 {
@@ -158,6 +174,17 @@ impl Script {
         if header.code_size < 2 || header.entry_pc >= header.code_size {
             return Err(FormatError("script entry outside code segment"));
         }
+        if kind == Payload::Unpacked {
+            let mut payload = raw[HEADER_SIZE..].to_vec();
+            if payload.len() as u64 > total || total - payload.len() as u64 > 16 {
+                return Err(FormatError(
+                    "unpacked script size disagrees with its segments",
+                ));
+            }
+            payload.resize(total as usize, 0);
+            return Self::from_payload(header, payload, 0);
+        }
+        let obfuscated = kind == Payload::Obfuscated;
         let packed = header.compressed_size as usize;
         let length = if packed == 0 {
             raw.len() - HEADER_SIZE
@@ -190,10 +217,18 @@ impl Script {
         if payload.len() as u64 != total {
             return Err(FormatError("script segment lengths disagree"));
         }
+        Self::from_payload(header, payload, raw.len() - HEADER_SIZE - length)
+    }
+
+    fn from_payload(
+        header: Header,
+        payload: Vec<u8>,
+        trailing_file_bytes: usize,
+    ) -> Result<Self, FormatError> {
         let script = Self {
             header,
             payload,
-            trailing_file_bytes: raw.len() - HEADER_SIZE - length,
+            trailing_file_bytes,
         };
         if script
             .labels()

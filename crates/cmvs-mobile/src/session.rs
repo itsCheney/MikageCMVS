@@ -6,15 +6,13 @@ use crate::{
     font::FontRenderer,
     font_library::{FontLibrary, family_names},
     input::{MobileInput, SCREEN},
-    log,
-    patch::PkPatch,
+    log, patch,
     select::{self, Basis},
 };
 use cmvs_core::{
     encoding::TextEncoding,
     input::KeyBindings,
     message::MESSAGE_WINDOWS,
-    patch::PatchFiles,
     ps3::Script,
     raster::RgbaImage,
     runner::{SaveTime, Startup, StartupEvent, load_start},
@@ -39,7 +37,7 @@ const STEP_BUDGET: Duration = Duration::from_millis(12);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Encoding {
-    /// GBK when the game has a Chinese patch in `Pk/`, else Shift-JIS.
+    /// GBK when the game has a Chinese patch (`Pk/` or `Longinus.dat`), else Shift-JIS.
     Automatic,
     ShiftJis,
     Gbk,
@@ -104,7 +102,7 @@ pub struct Session {
 impl Session {
     pub fn open(config: Config) -> Result<Self> {
         let root = config.game_dir.canonicalize()?;
-        let patch = PkPatch::find(&root)?.map(Arc::new);
+        let patch = patch::find(&root)?;
         let encoding = match config.encoding {
             Encoding::ShiftJis => TextEncoding::ShiftJis,
             Encoding::Gbk => TextEncoding::Gbk,
@@ -113,15 +111,13 @@ impl Session {
         };
         // Text and font decoding read it on the thread that runs the game.
         cmvs_core::encoding::set(encoding);
-        if let Some(patch) = &patch {
+        if let Some((_, line)) = &patch {
             log::emit(
                 log::INFO,
-                &format!(
-                    "translation patch: {} files in Pk, text {encoding:?}",
-                    patch.len()
-                ),
+                &format!("translation patch: {line}, text {encoding:?}"),
             );
         }
+        let patch = patch.map(|(patch, _)| patch);
         let font = font_renderer(&config.fonts)?;
         let selection = select::select(&root)?;
         for line in selection.game.selection.log_lines() {
@@ -161,7 +157,7 @@ impl Session {
         };
         let script: &'static _ = Box::leak(Box::new(start));
         let mut startup = Startup::new(script, &root, &selection.game, 0)?;
-        startup.set_patch(patch.map(|p| p as Arc<dyn PatchFiles>));
+        startup.set_patch(patch);
         if selection.lenient() {
             startup.set_allow_presumed(true);
             startup.set_allow_unreviewed(true);

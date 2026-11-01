@@ -38,7 +38,7 @@ pub mod cap {
     pub const SNAPSHOT_LAYOUT: &str = "snapshot-layout";
     /// A font file was supplied for glyph metrics.
     pub const FONT: &str = "font";
-    /// A translation patch (`Pk/*.pk`) is served before the game's files, with GBK text.
+    /// A translation patch (`Pk/*.pk` or `Longinus.dat`) is served before the game's files, with GBK text.
     pub const PATCH: &str = "patch";
 }
 
@@ -50,7 +50,7 @@ pub struct Target {
     pub identify_error: Option<String>,
     pub key_bindings: Option<KeyBindings>,
     pub capabilities: BTreeSet<&'static str>,
-    pub patch: Option<std::sync::Arc<cmvs_mobile::patch::PkPatch>>,
+    pub patch: Option<std::sync::Arc<dyn cmvs_core::patch::PatchFiles>>,
 }
 
 impl Target {
@@ -118,10 +118,10 @@ impl Target {
         if key_bindings.is_some() {
             capabilities.insert(cap::KEY_CONFIG);
         }
-        let patch = cmvs_mobile::patch::PkPatch::find(root)
+        let patch = cmvs_mobile::patch::find(root)
             .ok()
             .flatten()
-            .map(std::sync::Arc::new);
+            .map(|(patch, _)| patch);
         if patch.is_some() {
             capabilities.insert(cap::PATCH);
             cmvs_core::encoding::set(cmvs_core::encoding::TextEncoding::Gbk);

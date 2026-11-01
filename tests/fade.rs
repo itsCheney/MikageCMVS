@@ -95,7 +95,16 @@ fn additional_objects_use_stable_layers_and_validate_their_source_rectangles() {
         &[0, 0, 255, 255]
     );
     red.shown = true;
+    // A source past the right or bottom edge draws nothing there (Mikage:
+    // アオイトリ's menu reads a strip below its sheet); a negative one is refused.
     red.draw.as_mut().unwrap().words[2] = 1;
+    assert_eq!(
+        scene_render::render_with_objects(&scene, &[&blue, &red], 1, 1)
+            .unwrap()
+            .pixels(),
+        &[0, 0, 255, 255]
+    );
+    red.draw.as_mut().unwrap().words[2] = 0xffff;
     assert!(scene_render::render_with_objects(&scene, &[&blue, &red], 1, 1).is_err());
 }
 

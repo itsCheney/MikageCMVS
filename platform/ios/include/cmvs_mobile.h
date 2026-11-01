@@ -33,8 +33,8 @@ typedef struct {
 } CmvsConfig;
 
 enum {
-    CMVS_ENCODING_AUTOMATIC = 0, /* GBK when the game has a Chinese patch in Pk/
-                                    (e.g. 茶组's アマツツミ), else Shift-JIS */
+    CMVS_ENCODING_AUTOMATIC = 0, /* GBK when the game has a Chinese patch (Pk/
+                                    or Longinus.dat), else Shift-JIS */
     CMVS_ENCODING_SHIFT_JIS = 1,
     CMVS_ENCODING_GBK = 2,
 };
@@ -82,8 +82,9 @@ void cmvs_clear_fonts(void);
  * the engine has not recorded (updated releases, patched copies) still open:
  * the profile is taken from the engine executable in the folder, or the
  * 2016 baseline, and the log says so. A translation patch that hooks the
- * engine with a DLL and keeps its files in Pk/*.pk (scripts, PNG images) and
- * Pk/*.cmv (movies) is read in place of the game's own files. */
+ * engine with a DLL is read in place of the game's own files: Pk/*.pk
+ * (scripts, PNG images) with Pk/*.cmv (movies), or Longinus.dat (scripts,
+ * pixels) with data/pack/start.CHS. */
 CmvsSession *cmvs_open(const CmvsConfig *config);
 
 /* The game's screen size in pixels (1280 x 720). */

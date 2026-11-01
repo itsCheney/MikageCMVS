@@ -38,6 +38,46 @@ impl AuxiliaryText {
     /// at zero for each call and indexes the ruby-line flags +212..+340 that the call clears
     /// first, so only the every-line flag +200 reserves the ruby height +204. Ruby text is
     /// skipped; its base characters are laid out without the voiced-mark rule.
+    /// 0x1400321a0 (2017 builds, edx = 0): whether a character at pen `x` starts a new
+    /// line under the 0x23b8 rules. `state` is the overflow count +0x25c and the previous
+    /// character +0x260; a wrap clears both. Only a character past the edge is classified,
+    /// and only while +128 is set: 1 (hanging) or 2 (inseparable and equal to the previous
+    /// one) may run past the edge up to +0x198 times.
+    fn rule_wrap(
+        &self,
+        rules: &super::LineBreakRules,
+        x: f32,
+        code: u16,
+        state: &mut (u32, u16),
+    ) -> bool {
+        if !self.at_edge(x) {
+            state.1 = code;
+            return false;
+        }
+        if self.words[&128] != 0 {
+            // 0x1400320d0 walks byte pairs up to the NUL terminator.
+            let class = |set: &[u8]| {
+                set.chunks(2)
+                    .any(|pair| u16::from_be_bytes([pair[0], *pair.get(1).unwrap_or(&0)]) == code)
+            };
+            let kind = if class(&rules.hanging) {
+                1
+            } else if class(&rules.inseparable) {
+                2
+            } else {
+                0
+            };
+            if kind == 1 || (kind == 2 && state.1 == code) {
+                state.0 = state.0.wrapping_add(1);
+                if rules.max_overflow as u32 >= state.0 {
+                    return false;
+                }
+            }
+        }
+        *state = (0, 0);
+        true
+    }
+
     pub(super) fn layout(&self, text: &[u8]) -> Result<TextLayout, &'static str> {
         let byte = |i: usize| text.get(i).copied().unwrap_or(0);
         let size = self.words[&48];
@@ -61,6 +101,12 @@ impl AuxiliaryText {
         let (mut x, mut y) = (self.float(176), self.float(180));
         let mut line = 0u32;
         let mut glyphs = Vec::new();
+        let rules = self.line_break.as_ref();
+        let mut state = (0u32, 0u16);
+        let breaks = |x: f32, code: u16, state: &mut (u32, u16)| match rules {
+            Some(rules) => self.rule_wrap(rules, x, code, state),
+            None => self.at_edge(x) && !(no_break && crate::encoding::no_break(code)),
+        };
         // 0x14002f581 / 0x14002f6c9 / 0x14002f877: a line feed after the wrap test.
         let wrap = |x: &mut f32, y: &mut f32, line: &mut u32| -> Result<(), &'static str> {
             *line += 1;
@@ -102,6 +148,11 @@ impl AuxiliaryText {
                 continue;
             }
             if first == b'{' {
+                if let Some(rules) = rules
+                    && self.rule_wrap(rules, x, 0, &mut state)
+                {
+                    wrap(&mut x, &mut y, &mut line)?;
+                }
                 i += 1;
                 loop {
                     let b = byte(i);
@@ -111,7 +162,7 @@ impl AuxiliaryText {
                     if lead(b) {
                         let code = u16::from_be_bytes([b, byte(i + 1)]);
                         i += 2;
-                        if self.at_edge(x) && !(no_break && crate::encoding::no_break(code)) {
+                        if breaks(x, code, &mut state) {
                             wrap(&mut x, &mut y, &mut line)?;
                         }
                         glyphs.push(AuxiliaryGlyph {
@@ -152,6 +203,9 @@ impl AuxiliaryText {
                 i += 1;
                 if self.at_edge(x) {
                     wrap(&mut x, &mut y, &mut line)?;
+                    state = (0, 0);
+                } else if rules.is_some() {
+                    state.1 = code;
                 }
                 glyphs.push(AuxiliaryGlyph {
                     code,
@@ -163,7 +217,7 @@ impl AuxiliaryText {
             }
             let code = u16::from_be_bytes([first, byte(i + 1)]);
             i += 2;
-            if self.at_edge(x) && !(no_break && crate::encoding::no_break(code)) {
+            if breaks(x, code, &mut state) {
                 wrap(&mut x, &mut y, &mut line)?;
             }
             let mut position = [truncate(x), truncate(y)];
@@ -198,11 +252,29 @@ impl AuxiliaryText {
     /// 0x14002f120 from the current pen: (lines, widest line, last line), widths counted in
     /// Shift-JIS bytes. An unknown escape ends the measurement early.
     pub(super) fn measure(&self, text: &[u8]) -> Result<[u32; 3], &'static str> {
+        self.measure_with(text, None).map(|(bytes, _)| bytes)
+    }
+
+    /// 0x23bb (2017 builds, 0x14007acb0 -> 0x140033970): the same walk with widths in
+    /// pixels, (lines, widest line, last line). The original asks GDI for each glyph;
+    /// this uses the cell advances of the layout. Unlike 0x2390 it applies the 0x23b8 rules.
+    pub(super) fn measure_pixels(&self, text: &[u8]) -> Result<[u32; 3], &'static str> {
+        self.measure_with(text, self.line_break.as_ref())
+            .map(|(_, pixels)| pixels)
+    }
+
+    fn measure_with(
+        &self,
+        text: &[u8],
+        rules: Option<&super::LineBreakRules>,
+    ) -> Result<([u32; 3], [u32; 3]), &'static str> {
+        let mut state = (0u32, 0u16);
         let byte = |i: usize| text.get(i).copied().unwrap_or(0);
         let size_f = self.words[&48] as i32 as f32;
         let no_break = self.words[&128] != 0;
         let mut x = self.float(176);
         let (mut columns, mut lines, mut widest) = (0u32, 0u32, 0u32);
+        let (mut line_px, mut widest_px) = (0f32, 0f32);
         let mut i = 0;
         while byte(i) != 0 {
             let first = byte(i);
@@ -213,6 +285,7 @@ impl AuxiliaryText {
                         x = self.float(16);
                         i += 2;
                         columns = 0;
+                        line_px = 0.0;
                         lines += 1;
                     }
                     b'w' => i += 3,
@@ -224,10 +297,15 @@ impl AuxiliaryText {
                 continue;
             }
             if first == b'{' {
-                if self.at_edge(x) {
+                let edge = match rules {
+                    Some(rules) => self.rule_wrap(rules, x, 0, &mut state),
+                    None => self.at_edge(x),
+                };
+                if edge {
                     x = self.float(16);
                     lines += 1;
                     columns = 0;
+                    line_px = 0.0;
                 }
                 if lines >= MEASURE_FLAGS {
                     return Err("measured ruby line overwrites the caller's stack frame");
@@ -242,7 +320,9 @@ impl AuxiliaryText {
                         columns += 2;
                         i += 2;
                         x += size_f + self.float(52);
+                        line_px += size_f + self.float(52);
                         widest = widest.max(columns);
+                        widest_px = widest_px.max(line_px);
                     } else {
                         i += 1;
                         if b == b'/' {
@@ -270,28 +350,45 @@ impl AuxiliaryText {
                 let code = u16::from_be_bytes([first, byte(i + 1)]);
                 i += 2;
                 let advance = size_f + self.float(52);
-                if x >= (self.float(16) + self.float(24)) - advance
-                    && !(no_break && crate::encoding::no_break(code))
-                {
+                let edge = match rules {
+                    Some(rules) => self.rule_wrap(rules, x, code, &mut state),
+                    None => {
+                        x >= (self.float(16) + self.float(24)) - advance
+                            && !(no_break && crate::encoding::no_break(code))
+                    }
+                };
+                if edge {
                     columns = 0;
+                    line_px = 0.0;
                     lines += 1;
                     x = self.float(16);
                 }
                 columns += 2;
                 x += advance;
+                line_px += advance;
             } else {
                 i += 1;
                 if x >= (self.float(16) + self.float(24)) - (self.float(52) + size_f) {
                     x = self.float(16);
                     lines += 1;
                     columns = 0;
+                    line_px = 0.0;
+                    state = (0, 0);
+                } else if rules.is_some() {
+                    state.1 = first as i8 as i16 as u16;
                 }
                 columns += 1;
                 x += size_f * 0.5 + self.float(52);
+                line_px += size_f * 0.5 + self.float(52);
             }
             widest = widest.max(columns);
+            widest_px = widest_px.max(line_px);
         }
-        Ok([lines.wrapping_add(1), widest, columns])
+        let lines = lines.wrapping_add(1);
+        Ok((
+            [lines, widest, columns],
+            [lines, widest_px as u32, line_px as u32],
+        ))
     }
 
     /// Glyph half of 0x14002edb0, after the motion: in record order, a glyph whose padded
@@ -337,7 +434,7 @@ impl AuxiliaryText {
 
     /// 0x14002eb10 scales the descriptor by +352 / +360 and places the cell with the atlas
     /// grid from creation, but sizes it from the current +48. Only the unscaled case with
-    /// the creation size is modeled, and the cell must lie inside the atlas texture.
+    /// at most the creation size is modeled, and the cell must lie inside the atlas texture.
     fn check_cell(&self, cell: u16) -> Result<(), FormatError> {
         if [352, 356, 360].map(|at| self.words[&at])
             != [RESEARCH_SCREEN[0], RESEARCH_SCREEN[1], RESEARCH_SCREEN[0]]
@@ -346,9 +443,12 @@ impl AuxiliaryText {
         }
         let side =
             (self.words[&352].wrapping_mul(self.words[&48]) / self.words[&360]).wrapping_add(6);
-        if side != self.atlas.cell_side {
+        // アオイトリ's backlog creates its group at size 30 and draws at 28: a
+        // smaller glyph stays inside its cell. A larger one would spill into
+        // the neighbouring cells, which is not modeled.
+        if side > self.atlas.cell_side {
             return Err(FormatError(
-                "auxiliary glyph size differs from the atlas cell size",
+                "auxiliary glyph size exceeds the atlas cell size",
             ));
         }
         let pages = self.atlas.texture_size[1] / self.atlas.texture_size[0];

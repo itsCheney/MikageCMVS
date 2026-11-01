@@ -70,7 +70,16 @@ fn profile_for_executables(
             .games()
             .iter()
             .find(|game| game.executables.iter().any(|e| e.sha256 == exe.sha256))
-            .map(|game| (game.profile.clone(), exe.path.clone()))
+            .map(|game| game.profile.clone())
+            // A profile generated from a build no game record names yet.
+            .or_else(|| {
+                registry
+                    .profiles()
+                    .iter()
+                    .find(|p| p.binaries.iter().any(|b| b.sha256 == exe.sha256))
+                    .map(|p| p.id.clone())
+            })
+            .map(|profile| (profile, exe.path.clone()))
     })
 }
 

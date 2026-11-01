@@ -132,7 +132,9 @@ pub fn snapshot_layout_supported(profile: &crate::profile::EngineProfile) -> boo
 fn snapshot_layout(profile: &crate::profile::EngineProfile) -> Option<SnapshotLayout> {
     if profile.id == "cmvs-20150405" && profile.base.as_deref() == Some("cmvs-20160201") {
         Some(SnapshotLayout::TextV2)
-    } else if profile.base.is_none() {
+    } else if profile.base.is_none() || profile.id == "cmvs-20171129" {
+        // Mikage: the 2017 build is read back with the baseline's text v3 layout.
+        // Its own exe was not checked against these saves.
         Some(SnapshotLayout::TextV3)
     } else {
         None

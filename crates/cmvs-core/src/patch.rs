@@ -14,6 +14,13 @@ pub trait PatchFiles {
     /// An image replacing `name` (as scripts name it, e.g. `cg_bg.pb3`), in a
     /// format `image::decode` reads, such as [`raw_image`].
     fn image(&self, name: &[u8]) -> Result<Option<Vec<u8>>, Box<dyn Error>>;
+    /// Decoded pixels replacing those of `name`, as BGRA rows top down at the
+    /// size of the game's own image (Longinus patches hook the copy of the
+    /// decoded picture, so their files carry no header).
+    fn pixels(&self, name: &[u8]) -> Result<Option<Vec<u8>>, Box<dyn Error>> {
+        let _ = name;
+        Ok(None)
+    }
     /// A game-relative directory (ending in `\`) searched for movies before
     /// the 0x2015 movie directory.
     fn movie_directory(&self) -> Option<&[u8]> {
@@ -34,6 +41,23 @@ pub fn raw_image(image: &RgbaImage, alpha: bool) -> Vec<u8> {
     out.extend_from_slice(&u32::from(alpha).to_le_bytes());
     out.extend_from_slice(image.pixels());
     out
+}
+
+/// A [`raw_image`] of the BGRA `pixels` a patch serves for the PB3 image
+/// `original`, which gives the size and whether the image has alpha.
+pub fn replace_pixels(original: &[u8], mut pixels: Vec<u8>) -> Result<Vec<u8>, FormatError> {
+    let header = crate::pb3::Header::parse(original)?;
+    let (width, height) = (u32::from(header.width), u32::from(header.height));
+    if pixels.len() as u64 != u64::from(width) * u64::from(height) * 4 {
+        return Err(FormatError(
+            "patch pixels differ in size from the game's image",
+        ));
+    }
+    for pixel in pixels.chunks_exact_mut(4) {
+        pixel.swap(0, 2);
+    }
+    let image = RgbaImage::new(width, height, pixels)?;
+    Ok(raw_image(&image, header.bpp == 32))
 }
 
 /// Inverse of [`raw_image`].

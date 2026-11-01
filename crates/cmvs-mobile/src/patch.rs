@@ -1,7 +1,11 @@
-//! Translation patches that hook the engine with a DLL and keep their files
-//! in `Pk/*.pk` (茶组's アマツツミ Chinese patch: `amatsu.dll`).
+//! Translation patches that hook the engine with a DLL and serve their own
+//! files. Two kinds are read:
 //!
-//! A `.pk` file is `PKP\0`, a zero word, the entry count, then 0xb0-byte
+//! * `Pk/*.pk` (茶组's アマツツミ Chinese patch, `amatsu.dll`), see [`PkPatch`].
+//! * `Longinus.dat` (the Longinus hook, used by アオイトリ's Chinese patch),
+//!   see [`LonginusPatch`].
+//!
+//! Both carry GBK text. A `.pk` file is `PKP\0`, a zero word, the entry count, then 0xb0-byte
 //! entries: data offset, unpacked size, packed size, 36 zero bytes and a
 //! NUL-padded UTF-16 name. Data is raw DEFLATE. Scripts are PS2A without the
 //! byte obfuscation; images are PNG files named like the PB3 they replace
@@ -9,7 +13,7 @@
 //! as plain `.cmv` files. The patched scripts carry GBK text.
 use cmvs_core::{patch::PatchFiles, raster::RgbaImage};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashMap},
     error::Error,
     fs::File,
     io::{Read, Seek, SeekFrom},
@@ -17,6 +21,19 @@ use std::{
 };
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
+
+/// The translation patch of a game, if it has one, and a line for the log.
+pub fn find(root: &Path) -> Result<Option<(std::sync::Arc<dyn PatchFiles>, String)>> {
+    if let Some(patch) = PkPatch::find(root)? {
+        let line = format!("{} files in Pk", patch.len());
+        return Ok(Some((std::sync::Arc::new(patch), line)));
+    }
+    if let Some(patch) = LonginusPatch::find(root)? {
+        let line = format!("{} files in Longinus.dat", patch.len());
+        return Ok(Some((std::sync::Arc::new(patch), line)));
+    }
+    Ok(None)
+}
 
 const ENTRY_SIZE: usize = 0xb0;
 const NAME_OFFSET: usize = 0x30;
@@ -42,7 +59,7 @@ pub struct PkPatch {
 impl PkPatch {
     /// The patch in `<root>/Pk`, or None when the game has none.
     pub fn find(root: &Path) -> Result<Option<Self>> {
-        let Some(dir) = child_ignoring_case(root, "pk")? else {
+        let Some(dir) = child_ignoring_case(root, "pk", true)? else {
             return Ok(None);
         };
         let mut archives = Vec::new();
@@ -124,6 +141,117 @@ impl PatchFiles for PkPatch {
     }
 }
 
+/// `Longinus.dat`: `Longinus`, a version word (01 04 00 01), the entry count,
+/// then 12-byte entries (name hash, size, offset) and the files, stored as is.
+/// The hash is BKDR with seed 131 over the UTF-16LE bytes of the upper-case
+/// name, masked to 31 bits (Longinus.dll 0x1000540f). Scripts are PS2A as in
+/// the game's archives. Images are the decoded pixels, BGRA rows top down at
+/// the size of the PB3 they replace; Longinus.ini names the engine's file-read
+/// and picture-copy sites it hooks for both.
+///
+/// The patch also rewrites the exe's `ps3` of `start.ps3` to `CHS`, so the
+/// game starts from `data/pack/start.CHS` (the game's format, with the window
+/// title translated). The `start.ps3` inside the archive is a leftover that
+/// reads loose image folders the game does not have, and is not used.
+pub struct LonginusPatch {
+    path: PathBuf,
+    entries: HashMap<u32, (u32, u32)>,
+    start: Option<PathBuf>,
+}
+
+impl LonginusPatch {
+    /// `<root>/Longinus.dat`, or None when the game has none.
+    pub fn find(root: &Path) -> Result<Option<Self>> {
+        let Some(path) = child_ignoring_case(root, "longinus.dat", false)? else {
+            return Ok(None);
+        };
+        let mut file = File::open(&path)?;
+        let length = file.metadata()?.len();
+        let mut head = [0u8; 16];
+        file.read_exact(&mut head)?;
+        if &head[..8] != b"Longinus" {
+            return Err(format!("{}: not a Longinus archive", path.display()).into());
+        }
+        let count = u32::from_le_bytes(head[12..16].try_into().expect("4 bytes"));
+        if count > MAX_ENTRIES {
+            return Err(format!("{}: too many entries", path.display()).into());
+        }
+        let mut table = vec![0u8; count as usize * 12];
+        file.read_exact(&mut table)?;
+        let mut entries = HashMap::new();
+        for raw in table.chunks_exact(12) {
+            let word = |at: usize| u32::from_le_bytes(raw[at..at + 4].try_into().expect("4 bytes"));
+            let (hash, size, offset) = (word(0), word(4), word(8));
+            if size > MAX_FILE || u64::from(offset) + u64::from(size) > length {
+                return Err(format!("{}: entry outside the archive", path.display()).into());
+            }
+            entries.insert(hash, (size, offset));
+        }
+        let start = match child_ignoring_case(root, "data", true)? {
+            Some(data) => match child_ignoring_case(&data, "pack", true)? {
+                Some(pack) => child_ignoring_case(&pack, "start.chs", false)?,
+                None => None,
+            },
+            None => None,
+        };
+        Ok(Some(Self {
+            path,
+            entries,
+            start,
+        }))
+    }
+
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// Longinus.dll 0x1000540f.
+    pub fn hash(name: &str) -> u32 {
+        let mut hash = 0u32;
+        for unit in name.to_ascii_uppercase().encode_utf16() {
+            for byte in unit.to_le_bytes() {
+                hash = hash.wrapping_mul(131).wrapping_add(u32::from(byte));
+            }
+        }
+        hash & 0x7fff_ffff
+    }
+
+    fn read(&self, name: &[u8]) -> Result<Option<Vec<u8>>> {
+        let Ok(name) = std::str::from_utf8(name) else {
+            return Ok(None);
+        };
+        let Some(&(size, offset)) = self.entries.get(&Self::hash(name)) else {
+            return Ok(None);
+        };
+        let mut file = File::open(&self.path)?;
+        file.seek(SeekFrom::Start(u64::from(offset)))?;
+        let mut data = vec![0; size as usize];
+        file.read_exact(&mut data)?;
+        Ok(Some(data))
+    }
+}
+
+impl PatchFiles for LonginusPatch {
+    fn script(&self, name: &[u8]) -> Result<Option<Vec<u8>>> {
+        if name.eq_ignore_ascii_case(b"start.ps3") {
+            return match &self.start {
+                Some(path) => Ok(Some(std::fs::read(path)?)),
+                None => Ok(None),
+            };
+        }
+        self.read(name)
+    }
+    fn image(&self, _name: &[u8]) -> Result<Option<Vec<u8>>> {
+        Ok(None)
+    }
+    fn pixels(&self, name: &[u8]) -> Result<Option<Vec<u8>>> {
+        self.read(name)
+    }
+}
+
 fn read_index(path: &Path, archive: usize) -> Result<Vec<(String, Entry)>> {
     let mut file = File::open(path)?;
     let length = file.metadata()?.len();
@@ -200,14 +328,14 @@ fn extension(path: &Path) -> Option<String> {
 }
 
 /// A directory entry of `dir` named `name` in any letter case.
-fn child_ignoring_case(dir: &Path, name: &str) -> Result<Option<PathBuf>> {
+fn child_ignoring_case(dir: &Path, name: &str, directory: bool) -> Result<Option<PathBuf>> {
     for item in std::fs::read_dir(dir)? {
         let item = item?;
         if item
             .file_name()
             .to_str()
             .is_some_and(|n| n.eq_ignore_ascii_case(name))
-            && item.file_type()?.is_dir()
+            && item.file_type()?.is_dir() == directory
         {
             return Ok(Some(item.path()));
         }
@@ -274,5 +402,51 @@ mod tests {
         assert_eq!(patch.movie_directory(), Some(b"Pk\\".as_slice()));
         std::fs::remove_dir_all(&root).unwrap();
         assert!(PkPatch::find(&root.parent().unwrap().join("no-such-game")).is_err());
+    }
+    #[test]
+    fn longinus_hash_matches_the_hook_log() {
+        // CMVS_hook.log of アオイトリ's patch: sn401.ps3|Hash:0x71C45A76.
+        assert_eq!(LonginusPatch::hash("sn401.ps3"), 0x71c4_5a76);
+        assert_eq!(LonginusPatch::hash("sn108.ps3"), 0x001d_6d32);
+    }
+
+    #[test]
+    fn reads_scripts_pixels_and_the_chs_start_from_longinus() {
+        let root = std::env::temp_dir().join(format!("cmvs-longinus-{}", std::process::id()));
+        let pack = root.join("data").join("pack");
+        std::fs::create_dir_all(&pack).unwrap();
+        let files: [(&str, &[u8]); 3] = [
+            ("sn101.ps3", b"PS2A sn101"),
+            ("logo.pb3", &[1, 2, 3, 4]),
+            ("start.ps3", b"PS2A leftover"),
+        ];
+        let mut out = b"Longinus\x01\x04\x00\x01".to_vec();
+        out.extend((files.len() as u32).to_le_bytes());
+        let mut offset = 16 + 12 * files.len();
+        for (name, bytes) in files {
+            out.extend(LonginusPatch::hash(name).to_le_bytes());
+            out.extend((bytes.len() as u32).to_le_bytes());
+            out.extend((offset as u32).to_le_bytes());
+            offset += bytes.len();
+        }
+        for (_, bytes) in files {
+            out.extend(bytes);
+        }
+        std::fs::write(root.join("Longinus.dat"), out).unwrap();
+
+        // Without start.CHS the game's own start.ps3 is used.
+        let patch = LonginusPatch::find(&root).unwrap().unwrap();
+        assert_eq!(patch.len(), 3);
+        assert!(patch.script(b"start.ps3").unwrap().is_none());
+        assert_eq!(patch.script(b"SN101.PS3").unwrap().unwrap(), b"PS2A sn101");
+        assert_eq!(patch.pixels(b"logo.pb3").unwrap().unwrap(), [1, 2, 3, 4]);
+        assert!(patch.image(b"logo.pb3").unwrap().is_none());
+        assert!(patch.script(b"other.ps3").unwrap().is_none());
+
+        std::fs::write(pack.join("start.CHS"), b"PS2A chs").unwrap();
+        let (patch, line) = find(&root).unwrap().unwrap();
+        assert_eq!(line, "3 files in Longinus.dat");
+        assert_eq!(patch.script(b"start.ps3").unwrap().unwrap(), b"PS2A chs");
+        std::fs::remove_dir_all(&root).unwrap();
     }
 }

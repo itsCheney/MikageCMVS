@@ -135,3 +135,23 @@ fn reports_trailing_bytes_outside_compressed_payload() {
     raw.extend_from_slice(b"tail");
     assert_eq!(Script::decode(&raw).unwrap().trailing_file_bytes, 4);
 }
+
+#[test]
+fn patch_scripts_may_be_stored_decoded_and_a_little_short() {
+    // One label, a 2-byte code segment and 4 text bytes; the stored compressed size
+    // still names an LZSS payload the file does not hold (Longinus).
+    let payload = [0u8, 0, 0, 0, 0x01, 0x00, b'a', b'b', 0, 0];
+    let mut raw = b"PS2A".to_vec();
+    for value in [48u32, 0, 0, 1, 2, 0, 4, 0, 999, payload.len() as u32, 0] {
+        raw.extend(value.to_le_bytes());
+    }
+    raw.extend(&payload[..payload.len() - 2]);
+    assert!(cmvs_rs::ps3::Script::decode(&raw).is_err());
+    let script = cmvs_rs::ps3::Script::decode_patch(&raw).unwrap();
+    assert_eq!(script.payload(), payload);
+    // Far too short is still an error.
+    raw.truncate(raw.len() - 4);
+    let mut short = raw.clone();
+    short[28..32].copy_from_slice(&40u32.to_le_bytes());
+    assert!(cmvs_rs::ps3::Script::decode_patch(&short).is_err());
+}

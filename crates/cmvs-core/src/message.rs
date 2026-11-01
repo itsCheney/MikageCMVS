@@ -548,6 +548,10 @@ impl MessageHost {
             }
             return Ok(true);
         }
+        if let Some((pc, command @ (0x3b8 | 0x3bb))) = vm.pending_system() {
+            // Present only in 2017+ builds; the profile gate stops them for older ones.
+            return self.auxiliary_rules(vm, pc, command).map(|()| true);
+        }
         if let Some((pc, 0x382)) = vm.pending_system() {
             // 0x1400735e0 releases +4328 and its owned atlas/list, preserving the
             // separate +4392 font object and ordinary windows/text objects.
@@ -580,7 +584,9 @@ impl MessageHost {
             Some((pc, 0x18d)) => self.draw_query(vm, pc).map(|()| true),
             Some((pc, 0x151)) => self.cursor(vm, pc).map(|()| true),
             Some((pc, 0x155)) => self.glyph_parameter(vm, pc).map(|()| true),
-            Some((pc, 0x11f)) => self.measure(vm, pc).map(|()| true),
+            Some((pc, 0x11f)) => self.measure(vm, pc, 0x11f).map(|()| true),
+            // Present only in 2017+ builds; the profile gate stops it for older ones.
+            Some((pc, 0x11d)) => self.measure(vm, pc, 0x11d).map(|()| true),
             Some((pc, 0x112)) => self.measure_layout(vm, pc).map(|()| true),
             Some((pc, 0x119)) => self.encoded_length(vm, pc).map(|()| true),
             Some((pc, 0x14e)) => self.show(vm, pc).map(|()| true),
@@ -675,6 +681,68 @@ impl MessageHost {
                     .stop_motion();
             }
         }
+        Ok(())
+    }
+    /// 2017 builds. 0x23b8 (0x14007aaa0, returns 0x4010): SP-4 group slot, SP-8 hanging
+    /// set (+0x19c), SP-12 inseparable set (+0x1dc), SP-16 max overflow (+0x198); it
+    /// enables the rules (+0x194 = 1) for the layout 0x140032700 and the pixel
+    /// measurement. 0x23bb (0x14007acb0 -> 0x140033970, returns 0x4008): SP-4 slot,
+    /// SP-8 text; system results 0 = 1, 1 = widest line, 2 = lines, 4 = last line, in
+    /// pixels. A missing group only sets the unmodeled +0x2f20 bit 0x1000.
+    fn auxiliary_rules(
+        &mut self,
+        vm: &mut Machine<'_>,
+        pc: usize,
+        command: u16,
+    ) -> Result<(), DecodeError> {
+        let opcode = 0x2000 + command;
+        let word = |distance| {
+            vm.stack()
+                .peek_u32(distance)
+                .map_err(|e| error(pc, opcode, e.0))
+        };
+        let slot = word(4)? as usize;
+        let group = self
+            .auxiliary_texts
+            .get(slot)
+            .and_then(Option::as_ref)
+            .ok_or_else(|| {
+                error(
+                    pc,
+                    opcode,
+                    "auxiliary text group does not exist or outside 0..7",
+                )
+            })?;
+        if command == 0x3bb {
+            let text = vm.resolve_string(word(8)?)?;
+            let [lines, widest, last] = group
+                .measure_pixels(&text)
+                .map_err(|why| error(pc, opcode, why))?;
+            vm.complete_system(SystemResult(0x4008))?;
+            for (index, value) in [(0, 1), (1, widest), (2, lines), (4, last)] {
+                vm.state_mut()
+                    .set_system_integer(index, value)
+                    .expect("result exists");
+            }
+            return Ok(());
+        }
+        // Both sets are 64-byte fields; the copy keeps the NUL-terminated prefix.
+        let set = |raw: Vec<u8>| -> Vec<u8> {
+            let raw = raw.split(|b| *b == 0).next().unwrap_or_default();
+            raw[..raw.len().min(63)].to_vec()
+        };
+        let hanging = set(vm.resolve_string(word(8)?)?.to_vec());
+        let inseparable = set(vm.resolve_string(word(12)?)?.to_vec());
+        let max_overflow = word(16)? as i32;
+        vm.complete_system(SystemResult(0x4010))?;
+        self.auxiliary_texts[slot]
+            .as_mut()
+            .expect("validated")
+            .line_break = Some(LineBreakRules {
+            max_overflow,
+            hanging,
+            inseparable,
+        });
         Ok(())
     }
     /// 0x140073280: slot, font name, glyph size, capacity; returns 0x4010 and
@@ -1345,22 +1413,35 @@ impl MessageHost {
 
     /// 0x1400731d0 -> 0x14005ca80: SP-4 text index, SP-8 string reference.
     /// System results 0/1/2/4 = success/max count/lines/last count; pops 8.
-    fn measure(&mut self, vm: &mut Machine<'_>, pc: usize) -> Result<(), DecodeError> {
+    /// 0x211d (2017 build 0x1400799e0 -> 0x140062b30) has the same frame and result
+    /// slots with widths in pixels instead of bytes (`measure::measure_pixels`).
+    fn measure(
+        &mut self,
+        vm: &mut Machine<'_>,
+        pc: usize,
+        command: u16,
+    ) -> Result<(), DecodeError> {
+        let opcode = 0x2000 | command;
         let word = |distance| {
             vm.stack()
                 .peek_u32(distance)
-                .map_err(|e| error(pc, 0x211f, e.0))
+                .map_err(|e| error(pc, opcode, e.0))
         };
         let index = word(4)? as usize;
         let bytes = vm.resolve_string(word(8)?)?;
         let text = self.text(index).ok_or_else(|| {
             error(
                 pc,
-                0x211f,
+                opcode,
                 "text object index outside 0..11 or without an object sets an unmodeled flag",
             )
         })?;
-        let (counts, scratch) = measure::measure(text, &bytes).map_err(|e| error(pc, 0x211f, e))?;
+        let measure = if command == 0x11d {
+            measure::measure_pixels
+        } else {
+            measure::measure
+        };
+        let (counts, scratch) = measure(text, &bytes).map_err(|e| error(pc, opcode, e))?;
         vm.complete_system(SystemResult(0x4008))?;
         self.texts[index]
             .as_mut()

@@ -31,6 +31,9 @@ struct Layout<'a> {
     max: u32,
     overflow: u32,
     previous: u16,
+    /// Pixel advance of the current line and the widest line (0x211d).
+    pixels: u32,
+    widest: u32,
 }
 
 /// 0x140008080: lead bytes of the game encoding, without checking the trail byte.
@@ -63,6 +66,7 @@ impl Layout<'_> {
             .wrapping_add(self.text.glyph_size as u32)
             .wrapping_add(self.text.spacing[1] as u32);
         if reset {
+            self.pixels = 0;
             self.count = 0;
             self.overflow = 0;
             self.previous = 0;
@@ -108,11 +112,12 @@ impl Layout<'_> {
     fn add(&mut self, wide: bool) {
         self.count = self.count.wrapping_add(if wide { 2 } else { 1 });
         let size = self.text.glyph_size as u32;
-        self.x = self
-            .x
-            .wrapping_add(if wide { size } else { size >> 1 })
-            .wrapping_add(self.text.spacing[0] as u32);
+        let advance =
+            (if wide { size } else { size >> 1 }).wrapping_add(self.text.spacing[0] as u32);
+        self.x = self.x.wrapping_add(advance);
         self.max = self.max.max(self.count);
+        self.pixels = self.pixels.wrapping_add(advance);
+        self.widest = self.widest.max(self.pixels);
     }
 
     fn ruby_wrap(&mut self) -> Result<(), &'static str> {
@@ -142,6 +147,29 @@ pub(super) fn measure(
     text: &TextObject,
     bytes: &[u8],
 ) -> Result<([u32; 3], [u32; 2]), &'static str> {
+    let state = run(text, bytes)?;
+    Ok((
+        [state.max, state.line + 1, state.count],
+        [state.overflow, u32::from(state.previous)],
+    ))
+}
+
+/// 0x211d (2017 builds, 0x140062b30): the same walk in pixels, (widest line, lines,
+/// last line). The original measures each glyph through GDI on the window's font; this
+/// uses the fixed-pitch cell advances of the byte measurement (half a cell for a
+/// single byte), which is what monospaced faces such as MS Gothic give.
+pub(super) fn measure_pixels(
+    text: &TextObject,
+    bytes: &[u8],
+) -> Result<([u32; 3], [u32; 2]), &'static str> {
+    let state = run(text, bytes)?;
+    Ok((
+        [state.widest, state.line + 1, state.pixels],
+        [state.overflow, u32::from(state.previous)],
+    ))
+}
+
+fn run<'a>(text: &'a TextObject, bytes: &[u8]) -> Result<Layout<'a>, &'static str> {
     let bytes = bytes
         .split(|byte| *byte == 0)
         .next()
@@ -155,6 +183,8 @@ pub(super) fn measure(
         max: 0,
         overflow: 0,
         previous: 0,
+        pixels: 0,
+        widest: 0,
     };
     let mut i = 0;
     while i < bytes.len() {
@@ -221,8 +251,5 @@ pub(super) fn measure(
             }
         }
     }
-    Ok((
-        [state.max, state.line + 1, state.count],
-        [state.overflow, u32::from(state.previous)],
-    ))
+    Ok(state)
 }

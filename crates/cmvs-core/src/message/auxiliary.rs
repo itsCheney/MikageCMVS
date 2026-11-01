@@ -187,6 +187,9 @@ pub struct AuxiliaryText {
     /// +1472: a non-owned scene object moved along with this text group.
     pub associated_scene: Option<u8>,
     motion: Option<PositionMotion>,
+    /// 2017 builds: 0x23b8 line-break rules (+0x194 enabled, +0x198 max overflow,
+    /// +0x19c hanging set, +0x1dc inseparable set). The 2016 layout has none.
+    pub(super) line_break: Option<super::LineBreakRules>,
 }
 
 impl AuxiliaryText {
@@ -410,6 +413,7 @@ impl AuxiliaryText {
             secondary_image: None,
             associated_scene: None,
             motion: None,
+            line_break: None,
             object: SceneObject {
                 draw: Some(draw),
                 logical_size: RESEARCH_SCREEN,

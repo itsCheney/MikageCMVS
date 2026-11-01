@@ -65,9 +65,31 @@ pub struct Registered<'a> {
     cache: &'a mut Cache,
     patch: Option<&'a dyn crate::patch::PatchFiles>,
 }
+impl Registered<'_> {
+    /// The patch's image for `name`: a whole file, or pixels laid over the game's image.
+    fn patched(&mut self, name: &[u8]) -> Result<Option<Vec<u8>>, Box<dyn Error>> {
+        let Some(patch) = self.patch else {
+            return Ok(None);
+        };
+        if let Some(bytes) = patch.image(name)? {
+            return Ok(Some(bytes));
+        }
+        let Some(pixels) = patch.pixels(name)? else {
+            return Ok(None);
+        };
+        let Some(original) = crate::resources::ResourceSource::read(&mut self.inner, name)? else {
+            return Ok(None);
+        };
+        let name = String::from_utf8_lossy(name);
+        Ok(Some(
+            crate::patch::replace_pixels(&original, pixels)
+                .map_err(|e| format!("patch image {name}: {}", e.0))?,
+        ))
+    }
+}
 impl ImageSource for Registered<'_> {
     fn read(&mut self, name: &[u8]) -> Result<Option<Vec<u8>>, Box<dyn Error>> {
-        if let Some(bytes) = self.patch.map(|p| p.image(name)).transpose()?.flatten() {
+        if let Some(bytes) = self.patched(name)? {
             return Ok(Some(bytes));
         }
         self.cache.read(name, &mut self.inner)
@@ -77,7 +99,7 @@ impl ImageSource for Registered<'_> {
         Ok(())
     }
     fn read_image(&mut self, name: &[u8]) -> Result<Option<ImageRead>, Box<dyn Error>> {
-        if let Some(bytes) = self.patch.map(|p| p.image(name)).transpose()?.flatten() {
+        if let Some(bytes) = self.patched(name)? {
             return Ok(Some(ImageRead {
                 bytes,
                 cache_key: None,

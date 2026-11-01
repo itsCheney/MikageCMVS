@@ -12,6 +12,7 @@ pub mod cursor;
 pub mod digest;
 pub mod effect_objects;
 pub mod encoding;
+pub mod engine_flags;
 pub mod evaluate;
 pub mod exe;
 pub mod fade;
