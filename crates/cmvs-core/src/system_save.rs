@@ -3,7 +3,7 @@ mod pack;
 mod profile;
 mod write;
 use crate::{FormatError, MAX_PAYLOAD, evaluate::State, machine::Machine, vm::SystemResult};
-pub use profile::ProfileSystemSave;
+pub use profile::{HOST_SAVE_FOLDER, ProfileSystemSave};
 use std::{
     error::Error,
     fs::File,

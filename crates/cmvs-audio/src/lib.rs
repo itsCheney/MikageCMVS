@@ -10,7 +10,9 @@ use cmvs_core::{
     platform::resolve_under,
     resources::{ResourceArchives, ResourceKind, ResourceSource},
 };
-use rodio::{OutputStream, OutputStreamBuilder, Sink, Source};
+#[cfg(feature = "device")]
+use rodio::{OutputStream, OutputStreamBuilder};
+use rodio::{Sink, Source, mixer::Mixer};
 use std::{
     collections::BTreeMap,
     error::Error,
@@ -293,9 +295,25 @@ pub struct NativeAudio {
     voice_ducking: VoiceDucking,
     ducking_clock: Instant,
     // Channels must drop before the device stream.
-    stream: OutputStream,
+    output: Output,
+}
+/// Where the channels mix to: the default device, or a mixer the host pulls from.
+enum Output {
+    #[cfg(feature = "device")]
+    Device(OutputStream),
+    Mixer(Mixer),
+}
+impl Output {
+    fn mixer(&self) -> &Mixer {
+        match self {
+            #[cfg(feature = "device")]
+            Self::Device(stream) => stream.mixer(),
+            Self::Mixer(mixer) => mixer,
+        }
+    }
 }
 impl NativeAudio {
+    #[cfg(feature = "device")]
     pub fn new(root: &Path) -> Result<Self, Box<dyn Error>> {
         let fault: Fault = Arc::default();
         let copy = fault.clone();
@@ -310,6 +328,14 @@ impl NativeAudio {
             stream.config().sample_rate(),
             stream.config().channel_count()
         );
+        Self::with_output(root, Output::Device(stream), fault)
+    }
+    /// Mix into `mixer` instead of a device: the host pulls the samples from the
+    /// mixer's source (for example from a real-time audio callback of its own).
+    pub fn with_mixer(root: &Path, mixer: Mixer) -> Result<Self, Box<dyn Error>> {
+        Self::with_output(root, Output::Mixer(mixer), Arc::default())
+    }
+    fn with_output(root: &Path, output: Output, fault: Fault) -> Result<Self, Box<dyn Error>> {
         Ok(Self {
             root: root.canonicalize()?,
             paths: BTreeMap::new(),
@@ -323,7 +349,7 @@ impl NativeAudio {
             last_movie_report_ms: 0,
             voice_ducking: VoiceDucking::default(),
             ducking_clock: Instant::now(),
-            stream,
+            output,
         })
     }
     /// Observe BGM device channel 0 or 1 without changing playback or advancing time.
@@ -368,7 +394,7 @@ impl NativeAudio {
     ) -> Channel {
         let fault: Fault = Arc::default();
         let looped = program.looped.clone();
-        let sink = Sink::connect_new(self.stream.mixer());
+        let sink = Sink::connect_new(self.output.mixer());
         sink.pause();
         let gain = volume.min(256) as f32 / 256.0;
         let envelope = (fade_ms != 0).then(|| Envelope::new(0.0, 1.0, fade_ms));

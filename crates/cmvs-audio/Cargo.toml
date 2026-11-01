@@ -14,3 +14,9 @@ workspace = true
 cmvs-core = { path = "../cmvs-core" }
 rodio.workspace = true
 lewton.workspace = true
+
+[features]
+# Output to the default audio device (cpal). Hosts that pull samples from a mixer
+# of their own (cmvs-mobile) build without it.
+default = ["device"]
+device = ["rodio/playback"]

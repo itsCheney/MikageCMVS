@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/cmvs-core", "crates/cmvs-audio", "crates/cmvs-desktop", "crates/cmvs-native", "crates/cmvs-wgpu", "crates/cmvs-probe"]
+members = ["crates/cmvs-core", "crates/cmvs-audio", "crates/cmvs-desktop", "crates/cmvs-native", "crates/cmvs-wgpu", "crates/cmvs-probe", "crates/cmvs-mobile"]
 default-members = ["."]
 resolver = "3"
 
@@ -23,7 +23,7 @@ encoding_rs = "=0.8.42"
 ico = "=0.5.0"
 softbuffer = "=0.4.8"
 winit = { version = "=0.30.13", default-features = false, features = ["rwh_06", "x11", "wayland", "wayland-dlopen", "wayland-csd-adwaita-crossfont"] }
-rodio = { version = "=0.21.1", default-features = false, features = ["playback"] }
+rodio = { version = "=0.21.1", default-features = false }
 lewton = "=0.10.2"
 ab_glyph = { version = "=0.2.32", default-features = false, features = ["std"] }
 

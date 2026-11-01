@@ -40,20 +40,30 @@ fn external_directory(path: &Path, game_root: &Path) -> io::Result<PathBuf> {
     for name in missing.into_iter().rev() {
         resolved.push(name);
     }
-    if resolved.starts_with(&game_root) {
+    if resolved.starts_with(&game_root) && !is_host_save_folder(&resolved, &game_root) {
         return Err(io::Error::other(
             "user data directory must be outside the read-only game root",
         ));
     }
     fs::create_dir_all(&resolved)?;
     let resolved = resolved.canonicalize()?;
-    if resolved.starts_with(game_root) {
+    if resolved.starts_with(&game_root) && !is_host_save_folder(&resolved, &game_root) {
         return Err(io::Error::other(
             "user data directory resolves inside the read-only game root",
         ));
     }
     Ok(resolved)
 }
+
+/// Mikage keeps every engine's saves in `<game>/savedata`, next to the game files.
+/// That one folder is the exception to the outside-the-game-root rule: the engine
+/// never reads game resources from it, and nothing else under the root is written.
+fn is_host_save_folder(path: &Path, game_root: &Path) -> bool {
+    path.parent() == Some(game_root)
+        && path.file_name() == Some(std::ffi::OsStr::new(HOST_SAVE_FOLDER))
+}
+/// The folder name `is_host_save_folder` accepts.
+pub const HOST_SAVE_FOLDER: &str = "savedata";
 
 struct StagedFile {
     path: PathBuf,

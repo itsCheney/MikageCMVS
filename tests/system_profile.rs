@@ -278,3 +278,16 @@ fn failed_primary_replacement_preserves_old_file_and_synced_backup() {
     assert_eq!(fs::read(profile.path()).unwrap(), fixture(2));
     assert_eq!(fs::read(profile.backup_path()).unwrap(), fixture(1));
 }
+
+#[test]
+fn only_the_host_save_folder_may_sit_inside_the_game_root() {
+    use cmvs_rs::system_save::HOST_SAVE_FOLDER;
+    let root = Root::new();
+    let saves = root.game().join(HOST_SAVE_FOLDER);
+    let profile = ProfileSystemSave::open(&saves, &root.game()).unwrap();
+    assert_eq!(profile.directory(), saves.canonicalize().unwrap());
+    drop(profile);
+    for other in [root.game().join("save"), root.game().join("data/savedata")] {
+        assert!(ProfileSystemSave::open(&other, &root.game()).is_err());
+    }
+}

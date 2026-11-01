@@ -1,0 +1,33 @@
+[package]
+license.workspace = true
+name = "cmvs-mobile"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+description = "C interface for app hosts (iOS): runs a CMVS game into a Metal view. Header: platform/ios/include/cmvs_mobile.h"
+
+[lib]
+name = "cmvs_mobile"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+# Not the workspace lints: the C interface needs `unsafe` (raw pointers from the
+# host), so it is denied here and allowed only at the FFI functions.
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+all = "warn"
+
+[dependencies]
+cmvs-core = { path = "../cmvs-core" }
+cmvs-wgpu = { path = "../cmvs-wgpu" }
+cmvs-audio = { path = "../cmvs-audio", default-features = false }
+# For the desktop font modules this crate compiles in (see src/lib.rs).
+cmvs-native = { path = "../cmvs-native" }
+ab_glyph.workspace = true
+encoding_rs.workspace = true
+rodio.workspace = true
+pollster.workspace = true
+raw-window-handle = "=0.6.2"
+rtrb = "=0.3.2"
