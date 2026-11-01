@@ -10,6 +10,7 @@ pub mod cmv9;
 pub mod cpz;
 pub mod cursor;
 pub mod digest;
+pub mod dispatch;
 pub mod effect_objects;
 pub mod encoding;
 pub mod engine_flags;

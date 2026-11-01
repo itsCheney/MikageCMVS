@@ -26,6 +26,16 @@ cargo run --offline --release --features desktop --bin cmvs-desktop -- "E:/Downl
 
 未指定字体且未启用 `--record-text` 时保留文字输出屏障；`--record-text` 只记录字形。关闭窗口可退出；活动游戏中的 Esc 按游戏动作绑定处理。`--exit-after <秒>` 可做有界运行，`--save-frame <新文件.png>` 可导出退出时的帧。
 
+## CHRONOCLOCK研究运行
+
+已验证的《クロノクロック》PC样本可用以下参数启动原生软件绘制窗口及音频。它仍依赖两项显式研究放行，不能省略或视为全部命令已复核；样本身份与验证范围见[游戏档案](../games/chronoclock/README.md)。
+
+```bash
+cargo run --offline --release --features desktop,audio-output --bin cmvs-desktop -- "E:/Download/Purple Software/2015-04-24_CHRONOCLOCK" --encoding shift-jis --user-data-dir "local/chronoclock/play-user" --audio native --font "C:/Windows/Fonts/msgothic.ttc" --allow-presumed --allow-unreviewed
+```
+
+使用独立用户目录保留本次进度。正常剧情支持本作文字v2快照，可从工具栏打开存读档；无需使用会禁用剧情存档的 `--continue-without-snapshot`。原生窗口已验证空槽保存、关闭、重启恢复及设置持久化；覆盖范围之外的特殊图像、活动场景效果快照仍显式拒绝。鉴赏缩略图列表由脚本禁止键盘导航，使用鼠标；侧栏导航和剧情键盘输入另有验证，不能据此声称整个鉴赏页支持纯键盘。
+
 ## 原生音频
 
 ```bash
@@ -52,6 +62,10 @@ cargo run --offline --release --features desktop,audio-output --bin cmvs-desktop
 
 
 ## 设置保存与重启
+
+桌面选择的字体名由Unicode管理，不再要求能转为Shift-JIS；例如“萝莉体-DDC.yolan”可直接加载。用户目录内的 `font-faces/` 保存UTF-8名称，游戏配置和旧存档的固定长度字段保存稳定标识；迁移用户存档时应同时保留该目录。未指定用户目录时名称映射仅在当前会话有效。旧Shift-JIS字体名继续支持，缺失或损坏的映射、无法加载的字体会回退默认字体。
+
+所选字体仅缺个别字符或可绘制轮廓时，按字符回退到 `--font` 提供的默认字体。字宽测量与绘制使用同一个字体选择规则，避免缺字直接终止游戏。默认字体本身也缺字时可显示其缺字字形，故仍应提供覆盖游戏文字的默认字体。
 
 提供 `--user-data-dir` 时，优先读取该目录的 `cmvs.cfg`；首次没有用户配置时，从原游戏的只读配置开始。桌面正常退出（含诊断倒计时退出）保存当前已实现的设置，生成或替换用户 `cmvs.cfg`，旧配置留在 `cmvs.cfg.bak`。VM错误退出不自动保存。没有独立用户目录或使用单次 `--system-save-output` 时不写配置。无窗口库调用方需显式调用 `Startup::save_preferences`，Drop不执行可能失败的保存。
 

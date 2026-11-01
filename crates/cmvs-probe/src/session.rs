@@ -337,6 +337,13 @@ impl<'a> Session<'a> {
             if !present {
                 return Err(format!("button {group}:{button} is not present"));
             }
+            if group
+                .checked_sub(cmvs_core::buttons::BUTTON_GROUPS)
+                .and_then(|slot| self.run.buttons().list_group(slot))
+                .is_some_and(|list| list.disable_navigation)
+            {
+                return Err(format!("keyboard navigation is disabled for group {group}"));
+            }
             self.event(
                 "action",
                 Json::obj([("action", Json::from(format!("{action:?}")))]),
@@ -388,7 +395,17 @@ impl<'a> Session<'a> {
             for command in self.run.take_unreviewed_notices() {
                 self.event(
                     "unreviewed-allowed",
-                    Json::obj([("command", Json::hex(0x2000 + u64::from(command)))]),
+                    Json::obj([
+                        ("command", Json::hex(0x2000 + u64::from(command))),
+                        (
+                            "semantics",
+                            cmvs_core::dispatch::semantics_name(
+                                self.run.gate().selection().profile,
+                                command,
+                            )
+                            .into(),
+                        ),
+                    ]),
                 );
             }
             match event {

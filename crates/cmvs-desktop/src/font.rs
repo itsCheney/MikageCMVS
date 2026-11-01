@@ -30,12 +30,11 @@ pub struct FontRenderer {
 
 struct PreviewMetrics(Arc<Mutex<FontLibrary>>);
 impl PreviewMetrics {
-    fn font(&self, face: &[u8]) -> Result<Arc<FontVec>, &'static str> {
+    fn font(&self, face: &[u8], ch: char) -> Result<Arc<FontVec>, &'static str> {
         self.0
             .lock()
-            .map_err(|_| "font library lock poisoned")?
-            .face(face)
-            .map_err(|e| e.0)
+            .map_err(|_| "font library lock poisoned")
+            .map(|mut library| library.for_character(face, ch))
     }
 }
 impl std::fmt::Debug for PreviewMetrics {
@@ -44,6 +43,24 @@ impl std::fmt::Debug for PreviewMetrics {
     }
 }
 impl cmvs_core::message::GlyphMetrics for PreviewMetrics {
+    fn advance_width(
+        &self,
+        face: &[u8],
+        code: u16,
+        size: u32,
+        _bold: bool,
+    ) -> Result<u32, &'static str> {
+        if !(1..=128).contains(&size) {
+            return Err("glyph size outside 1..128 preview range");
+        }
+        let ch = character(code).map_err(|e| e.0)?;
+        let font = self.font(face, ch)?;
+        let advance = font.as_scaled(size as f32).h_advance(font.glyph_id(ch));
+        if !advance.is_finite() || advance < 0.0 || advance > u16::MAX as f32 {
+            return Err("invalid proportional font advance");
+        }
+        Ok(advance.round() as u32)
+    }
     fn styled_ink_width(
         &self,
         face: &[u8],
@@ -62,12 +79,9 @@ impl cmvs_core::message::GlyphMetrics for PreviewMetrics {
         if !(1..=128).contains(&size) {
             return Err("glyph size outside 1..128 preview range");
         }
-        let font = self.font(face)?;
         let ch = character(code).map_err(|e| e.0)?;
+        let font = self.font(face, ch)?;
         let id = font.glyph_id(ch);
-        if id.0 == 0 {
-            return Err("selected font has no glyph for a requested character");
-        }
         let scale = size as f32;
         let baseline = font.as_scaled(scale).ascent();
         let Some(outline) =
@@ -243,11 +257,33 @@ impl FontRenderer {
             .lock()
             .is_ok_and(|mut library| library.contains(face))
     }
-    fn font(&self, face: &[u8]) -> Result<Arc<FontVec>, FormatError> {
+    pub fn set_user_directory(&self, directory: &Path) -> Result<(), FormatError> {
         self.library
             .lock()
             .map_err(|_| FormatError("font library lock poisoned"))?
-            .face(face)
+            .set_user_directory(directory);
+        Ok(())
+    }
+    pub fn family_name(&self, face: &[u8]) -> Result<String, FormatError> {
+        self.library
+            .lock()
+            .map_err(|_| FormatError("font library lock poisoned"))?
+            .family_name(face)
+    }
+    pub fn select_unicode_face(&self, name: &str) -> Result<Vec<u8>, FormatError> {
+        let mut library = self
+            .library
+            .lock()
+            .map_err(|_| FormatError("font library lock poisoned"))?;
+        let face = library.register_unicode(name)?;
+        library.face(&face)?;
+        Ok(face)
+    }
+    fn font(&self, face: &[u8], ch: char) -> Result<Arc<FontVec>, FormatError> {
+        self.library
+            .lock()
+            .map_err(|_| FormatError("font library lock poisoned"))
+            .map(|mut library| library.for_character(face, ch))
     }
     fn glyph(&mut self, glyph: &RecordedGlyph) -> Result<RgbaImage, FormatError> {
         if !(1..=128).contains(&glyph.size) {
@@ -273,14 +309,9 @@ impl FontRenderer {
         if let Some(image) = self.cache.get(&key) {
             return Ok(image.clone());
         }
-        let font = self.font(&glyph.face)?;
         let ch = character(glyph.code)?;
+        let font = self.font(&glyph.face, ch)?;
         let id = font.glyph_id(ch);
-        if id.0 == 0 {
-            return Err(FormatError(
-                "selected font has no glyph for a requested character",
-            ));
-        }
         let scale = glyph.size as f32;
         let baseline = font.as_scaled(scale).ascent();
         let side = glyph.size as usize + 4;
@@ -532,6 +563,14 @@ mod tests {
             (width + 1).min(27)
         );
         assert_eq!(metrics.styled_ink_width(face, 32, 27, true).unwrap(), 0);
+        // An unavailable selected face must use the same fallback for measuring
+        // and painting, including glyphs already cached under the default face.
+        glyph.face = Arc::from(&b"CMVS unavailable regression font"[..]);
+        assert_eq!(font.glyph(&glyph).unwrap(), normal);
+        assert_eq!(
+            metrics.ink_width(&glyph.face, glyph.code, glyph.size),
+            metrics.ink_width(face, glyph.code, glyph.size)
+        );
     }
     #[test]
     fn bold_mask_extends_ink_once_without_crossing_rows() {

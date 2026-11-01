@@ -25,6 +25,7 @@ use std::{error::Error, sync::Arc};
 mod auxiliary;
 mod auxiliary_layout;
 mod auxiliary_motion;
+pub(crate) mod font_cells;
 mod measure;
 mod output;
 mod wait;
@@ -182,6 +183,16 @@ pub struct TextObject {
 /// The core applies the original minimum half-size advance and spacing separately.
 /// `face` is the font object's face in the game encoding.
 pub trait GlyphMetrics: std::fmt::Debug {
+    /// Cell advance (GDI gmCellIncX), distinct from the visible ink extent.
+    fn advance_width(
+        &self,
+        _face: &[u8],
+        _code: u16,
+        _size: u32,
+        _bold: bool,
+    ) -> Result<u32, &'static str> {
+        Err("font backend does not implement proportional glyph advances")
+    }
     fn ink_width(&self, face: &[u8], code: u16, size: u32) -> Result<u32, &'static str>;
     fn styled_ink_width(
         &self,
@@ -199,6 +210,8 @@ pub trait GlyphMetrics: std::fmt::Debug {
 
 #[derive(Debug, Default)]
 pub struct MessageHost {
+    /// State owned by the separately dispatched font-cell text implementation.
+    font_cells: font_cells::State,
     output_settings: crate::settings::TextOutputSettings,
     /// Global dword_1401015c4, shared by all message windows and retained while paused.
     auto_elapsed: u32,
@@ -584,9 +597,7 @@ impl MessageHost {
             Some((pc, 0x18d)) => self.draw_query(vm, pc).map(|()| true),
             Some((pc, 0x151)) => self.cursor(vm, pc).map(|()| true),
             Some((pc, 0x155)) => self.glyph_parameter(vm, pc).map(|()| true),
-            Some((pc, 0x11f)) => self.measure(vm, pc, 0x11f).map(|()| true),
-            // Present only in 2017+ builds; the profile gate stops it for older ones.
-            Some((pc, 0x11d)) => self.measure(vm, pc, 0x11d).map(|()| true),
+            Some((pc, 0x11f)) => self.measure(vm, pc).map(|()| true),
             Some((pc, 0x112)) => self.measure_layout(vm, pc).map(|()| true),
             Some((pc, 0x119)) => self.encoded_length(vm, pc).map(|()| true),
             Some((pc, 0x14e)) => self.show(vm, pc).map(|()| true),
@@ -1413,35 +1424,22 @@ impl MessageHost {
 
     /// 0x1400731d0 -> 0x14005ca80: SP-4 text index, SP-8 string reference.
     /// System results 0/1/2/4 = success/max count/lines/last count; pops 8.
-    /// 0x211d (2017 build 0x1400799e0 -> 0x140062b30) has the same frame and result
-    /// slots with widths in pixels instead of bytes (`measure::measure_pixels`).
-    fn measure(
-        &mut self,
-        vm: &mut Machine<'_>,
-        pc: usize,
-        command: u16,
-    ) -> Result<(), DecodeError> {
-        let opcode = 0x2000 | command;
+    fn measure(&mut self, vm: &mut Machine<'_>, pc: usize) -> Result<(), DecodeError> {
         let word = |distance| {
             vm.stack()
                 .peek_u32(distance)
-                .map_err(|e| error(pc, opcode, e.0))
+                .map_err(|e| error(pc, 0x211f, e.0))
         };
         let index = word(4)? as usize;
         let bytes = vm.resolve_string(word(8)?)?;
         let text = self.text(index).ok_or_else(|| {
             error(
                 pc,
-                opcode,
+                0x211f,
                 "text object index outside 0..11 or without an object sets an unmodeled flag",
             )
         })?;
-        let measure = if command == 0x11d {
-            measure::measure_pixels
-        } else {
-            measure::measure
-        };
-        let (counts, scratch) = measure(text, &bytes).map_err(|e| error(pc, opcode, e))?;
+        let (counts, scratch) = measure::measure(text, &bytes).map_err(|e| error(pc, 0x211f, e))?;
         vm.complete_system(SystemResult(0x4008))?;
         self.texts[index]
             .as_mut()

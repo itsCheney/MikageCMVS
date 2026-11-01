@@ -59,18 +59,3 @@ fn background_sound_defaults_on_and_answers_queries() {
     }
     assert!(!flags.background_sound);
 }
-
-#[test]
-fn glyph_replacement_flag_pops_one_word_and_sets_no_result() {
-    let mut code = vec![];
-    call(&mut code, 0x23ac, &[5]);
-    let script = script(&code);
-    let mut vm = Machine::new(&script).unwrap();
-    let mut flags = EngineFlags::default();
-    pending(&mut vm);
-    vm.state_mut().set_system_integer(0, 9).unwrap();
-    assert!(flags.try_handle(&mut vm).unwrap());
-    assert!(flags.glyph_replacement);
-    assert_eq!(vm.state().system_integer(0), Some(9));
-    assert_eq!(vm.stack().len_bytes(), 0);
-}

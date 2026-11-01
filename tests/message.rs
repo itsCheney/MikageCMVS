@@ -156,6 +156,70 @@ fn yielding_append_outputs_once_and_does_not_consume_release_or_bypass_reveal() 
 }
 
 #[test]
+fn shared_append_flow_distinguishes_pending_wait_from_completed_yield() {
+    use cmvs_rs::{
+        dispatch::{self, Flow, Hosts, TextHosts},
+        profile::Semantics,
+    };
+    let mut code = vec![];
+    create(&mut code, 0, 7, [0, 0, 300, 100]);
+    call(&mut code, 0x2157, &[0, 123, 0]);
+    let program = script_with_text(&code, b"\x82\xa0\x82\xa2\0");
+    let mut vm = Machine::new(&program).unwrap();
+    let mut messages = MessageHost::default();
+    run(&mut vm, &mut messages, 1);
+    messages.set_record_output(true);
+    pending(&mut vm);
+    let pc = vm.pc();
+    let mut input = ActionInput::default();
+    for repeat in 1..=3 {
+        assert_eq!(
+            dispatch::run(
+                Semantics::Root,
+                &mut vm,
+                &mut Hosts {
+                    text: Some(TextHosts {
+                        messages: &mut messages,
+                        input: &mut input,
+                        flags: Default::default()
+                    }),
+                    ..Default::default()
+                }
+            )
+            .unwrap(),
+            Some(Flow::Wait)
+        );
+        assert_eq!(
+            (vm.pc(), vm.stack().len_bytes(), vm.repeat_count()),
+            (pc, 12, repeat)
+        );
+        assert_eq!(messages.text(7).unwrap().glyphs.len(), 2);
+    }
+    messages.advance_frame(1000);
+    assert_eq!(
+        dispatch::run(
+            Semantics::Root,
+            &mut vm,
+            &mut Hosts {
+                text: Some(TextHosts {
+                    messages: &mut messages,
+                    input: &mut input,
+                    flags: Default::default()
+                }),
+                ..Default::default()
+            }
+        )
+        .unwrap(),
+        Some(Flow::Yield)
+    );
+    assert_eq!(vm.pending_system(), None);
+    assert_eq!(
+        (vm.pc(), vm.stack().len_bytes(), vm.repeat_count()),
+        (pc + 2, 0, 0)
+    );
+}
+
+#[test]
 fn timed_window_wait_ignores_manual_skip_and_auto_flags_and_finishes_without_yield() {
     use cmvs_rs::{message::AutoAdvanceContext, settings::AutoAdvanceSettings};
     for (voice, auto) in [(-1i32, false), (-1, true), (5, false), (5, true)] {
@@ -4023,6 +4087,136 @@ fn direct_half_width_text_uses_backend_ink_extent_with_minimum_half_size_and_wra
     assert_eq!(text.cursor, [27, 25]);
 }
 
+fn font_cell_step(
+    vm: &mut Machine<'_>,
+    messages: &mut MessageHost,
+) -> Result<bool, Box<dyn std::error::Error>> {
+    let profile = cmvs_rs::profile::Registry::builtin()
+        .profile("cmvs-20171114")
+        .unwrap();
+    let mut input = ActionInput::default();
+    match cmvs_rs::dispatch::run(
+        profile.semantics(vm.pending_system().unwrap().1),
+        vm,
+        &mut cmvs_rs::dispatch::Hosts {
+            text: Some(cmvs_rs::dispatch::TextHosts {
+                messages,
+                input: &mut input,
+                flags: Default::default(),
+            }),
+            ..Default::default()
+        },
+    )? {
+        Some(
+            cmvs_rs::dispatch::Flow::Done
+            | cmvs_rs::dispatch::Flow::Yield
+            | cmvs_rs::dispatch::Flow::Wait,
+        ) => Ok(true),
+        Some(cmvs_rs::dispatch::Flow::Unhandled | cmvs_rs::dispatch::Flow::Unavailable) => {
+            Ok(false)
+        }
+        None => Ok(messages.try_handle(vm)?),
+    }
+}
+fn run_font_cells(vm: &mut Machine<'_>, messages: &mut MessageHost, count: usize) {
+    for _ in 0..count {
+        pending(vm);
+        assert!(font_cell_step(vm, messages).unwrap());
+    }
+}
+
+#[test]
+fn proportional_output_uses_cell_advance_and_switches_back_without_changing_results() {
+    #[derive(Debug)]
+    struct Metrics;
+    impl cmvs_rs::message::GlyphMetrics for Metrics {
+        fn ink_width(&self, _: &[u8], _: u16, _: u32) -> Result<u32, &'static str> {
+            Ok(17)
+        }
+        fn advance_width(&self, _: &[u8], code: u16, _: u32, _: bool) -> Result<u32, &'static str> {
+            Ok(if code == 0x82a0 { 13 } else { 3 })
+        }
+    }
+    let mut code = vec![];
+    direct_output(&mut code);
+    call(&mut code, 0x23ac, &[u32::MAX]);
+    call(&mut code, 0x210b, &[1, 1]);
+    call(&mut code, 0x23ac, &[0]);
+    call(&mut code, 0x210b, &[1, 1]);
+    let script = script_with_text(&code, b"\0W\x82\xa0\0");
+    let mut vm = Machine::new(&script).unwrap();
+    let mut messages = MessageHost::default();
+    messages.set_record_output(true);
+    messages.set_glyph_metrics(Box::new(Metrics));
+    run_font_cells(&mut vm, &mut messages, 4);
+    vm.state_mut().set_system_integer(0, 123).unwrap();
+    run_font_cells(&mut vm, &mut messages, 4);
+    let text = messages.text(1).unwrap();
+    assert_eq!(
+        text.glyphs.iter().map(|g| g.position).collect::<Vec<_>>(),
+        [[10, 5], [13, 5], [26, 5], [43, 5]]
+    );
+    assert_eq!(text.cursor, [63, 5]);
+    assert_eq!(vm.state().system_integer(0), Some(123));
+    assert_eq!(vm.stack().len_bytes(), 0);
+}
+
+#[test]
+fn proportional_output_without_metrics_keeps_pending_stack_and_text() {
+    let mut code = vec![];
+    direct_output(&mut code);
+    call(&mut code, 0x23ac, &[1]);
+    call(&mut code, 0x210b, &[1, 1]);
+    let script = script_with_text(&code, b"\0\x82\xa0\0");
+    let mut vm = Machine::new(&script).unwrap();
+    let mut messages = MessageHost::default();
+    messages.set_record_output(true);
+    run_font_cells(&mut vm, &mut messages, 5);
+    pending(&mut vm);
+    let before = messages.text(1).unwrap().clone();
+    let stack = vm.stack().len_bytes();
+    assert!(
+        font_cell_step(&mut vm, &mut messages)
+            .unwrap_err()
+            .to_string()
+            .contains("font metrics")
+    );
+    assert_eq!(messages.text(1), Some(&before));
+    assert_eq!(vm.stack().len_bytes(), stack);
+    assert_eq!(vm.pending_system().map(|p| p.1), Some(0x10b));
+}
+
+#[test]
+fn pixel_measurement_uses_advance_width_preserves_pen_and_skips_ruby_annotation() {
+    #[derive(Debug)]
+    struct Metrics;
+    impl cmvs_rs::message::GlyphMetrics for Metrics {
+        fn ink_width(&self, _: &[u8], _: u16, _: u32) -> Result<u32, &'static str> {
+            Ok(99)
+        }
+        fn advance_width(&self, _: &[u8], code: u16, _: u32, _: bool) -> Result<u32, &'static str> {
+            Ok(if code == 0x82a0 { 13 } else { 3 })
+        }
+    }
+    let mut code = vec![];
+    direct_output(&mut code);
+    call(&mut code, 0x23ac, &[1]);
+    call(&mut code, 0x211d, &[1, 1]);
+    let script = script_with_text(&code, b"\0W{\x82\xa0/\x82\xa2}\\nW\0");
+    let mut vm = Machine::new(&script).unwrap();
+    let mut messages = MessageHost::default();
+    messages.set_glyph_metrics(Box::new(Metrics));
+    run_font_cells(&mut vm, &mut messages, 5);
+    let before = messages.text(1).unwrap().clone();
+    run_font_cells(&mut vm, &mut messages, 1);
+    assert_eq!(messages.text(1).unwrap().cursor, before.cursor);
+    assert_eq!(messages.text(1).unwrap().glyphs, before.glyphs);
+    for (slot, expected) in [(0, 1), (1, 16), (2, 2), (4, 3)] {
+        assert_eq!(vm.state().system_integer(slot), Some(expected));
+    }
+    assert_eq!(vm.stack().len_bytes(), 0);
+}
+
 #[test]
 fn device_window_creation_matches_explicit_viewport_and_cleans_six_words() {
     let mut code = vec![];
@@ -4376,41 +4570,4 @@ fn font_objects_keep_their_face_glyphs_capture_it_and_the_dialog_refreshes_defau
     // A new slot's font object takes the global face at creation.
     run(&mut vm, &mut messages, 1);
     assert_eq!(face(&messages, 9), b"New");
-}
-
-#[test]
-fn pixel_text_measurement_uses_cell_advances_with_the_byte_measurement_slots() {
-    for (bytes, wide, narrow, lines, last_wide, last_narrow) in [
-        (&b"abcd"[..], 0, 4, 1, 0, 4),
-        (&b"\x82\xa0\x82\xa2AB"[..], 2, 2, 1, 2, 2),
-        (&b"\x82\xa0\x82\xa2\\nx"[..], 2, 0, 2, 0, 1),
-    ] {
-        let mut code = vec![];
-        create(&mut code, 0, 7, [20, 540, 1280, 180]);
-        call(&mut code, 0x211d, &[0, 7]);
-        let mut data = bytes.to_vec();
-        data.push(0);
-        let script = script_with_text(&code, &data);
-        let mut vm = Machine::new(&script).unwrap();
-        let mut messages = MessageHost::default();
-        run(&mut vm, &mut messages, 1);
-        let text = messages.text(7).cloned().unwrap();
-        let size = text.glyph_size as u32;
-        let full = size + text.spacing[0] as u32;
-        let half = size / 2 + text.spacing[0] as u32;
-        run(&mut vm, &mut messages, 1);
-        for (slot, value) in [
-            (0, 1),
-            (1, wide * full + narrow * half),
-            (2, lines),
-            (4, last_wide * full + last_narrow * half),
-        ] {
-            assert_eq!(
-                vm.state().system_integer(slot),
-                Some(value),
-                "{bytes:?} slot {slot}"
-            );
-        }
-        assert_eq!(vm.stack().len_bytes(), 0);
-    }
 }

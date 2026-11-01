@@ -5,7 +5,6 @@ use cmvs_rs::{
     buttons::ButtonHost,
     camera::CameraHost,
     cpz::ArchiveIndex,
-    effect_objects,
     fade::SkipGate,
     gesture::PointerGesture,
     history::HistoryHost,
@@ -24,7 +23,6 @@ use cmvs_rs::{
     sequence::SequenceHost,
     snapshot::{SaveImage, SaveTitle},
     system_save::{FileSystemSave, SystemSaveHost},
-    text,
     timers::VmTimers,
 };
 use std::{collections::BTreeMap, env, error::Error, fs::File, io::Read};
@@ -340,12 +338,215 @@ fn run() -> Result<(), Box<dyn Error>> {
             command,
         } = event
         {
-            let checked = gate.check(&machine, system_pc, command);
-            if let Some(first) = checked? {
+            let resolved = gate.resolve(&machine, system_pc, command)?;
+            if let Some(first) = resolved.first_unreviewed {
                 println!(
-                    "# UNREVIEWED system command 0x{:04x} allowed with base semantics (--allow-unreviewed, first use)",
-                    0x2000 + first
+                    "# UNREVIEWED system command 0x{:04x} allowed with {} (--allow-unreviewed, first use)",
+                    0x2000 + first,
+                    cmvs_rs::dispatch::semantics_name(gate.selection().profile, first)
                 );
+            }
+            let wait_gate = SkipGate {
+                skip: message_flags.skip(),
+                ..SkipGate::default()
+            };
+            let dispatched = cmvs_rs::dispatch::run(
+                resolved.semantics,
+                &mut machine,
+                &mut cmvs_rs::dispatch::Hosts {
+                    audio: platform_assets
+                        .is_some()
+                        .then_some(cmvs_rs::dispatch::AudioHosts {
+                            audio: &mut audio,
+                            backend: &mut audio_backend,
+                        }),
+                    waits: platform_assets
+                        .is_some()
+                        .then_some(cmvs_rs::dispatch::WaitHosts {
+                            scene: Some(&mut scene),
+                            camera: None,
+                            input: &mut input,
+                            gate: wait_gate,
+                            change_images: false,
+                        }),
+                    timers: platform_assets.is_some().then_some(&mut timers),
+                    flags: platform_assets.is_some().then_some(&mut message_flags),
+                    random: random.as_mut(),
+                    settings: platform_assets.is_some().then_some(&mut settings),
+                    history: platform_assets.is_some().then_some(&mut history),
+                    strings: platform_assets.is_some(),
+                    gesture: platform_assets.is_some().then_some(&mut gesture),
+                    popup: platform_assets.is_some().then_some(&mut save_menu),
+                    save_title: platform_assets.is_some().then_some(&mut save_title),
+                    effect_objects: platform_assets.is_some(),
+                    ..Default::default()
+                },
+            )?;
+            if dispatched.is_some_and(cmvs_rs::dispatch::Flow::yields) {
+                let Some(delta) = frame_ms else {
+                    println!(
+                        "# WAIT fade/mask transition at pc=0x{:x}; PC and stack preserved; supply --frame-ms to advance engine frames",
+                        machine.pc()
+                    );
+                    return Ok(());
+                };
+                if let (Some(images), Some(config)) = (&mut images, &bootstrap) {
+                    sequence.advance_frame_with_hosts(
+                        delta,
+                        &mut scene,
+                        &mut images.with_paths(config.paths()),
+                        &mut camera,
+                    )?;
+                } else {
+                    sequence.advance_frame(delta)?;
+                }
+                scene.advance_frame(delta);
+                camera.advance_frame(delta);
+                movies.advance(delta);
+                frame_delta = delta;
+                resume_run = true;
+                println!(
+                    "# frame delta_ms={delta} fade={:?} mask={:?}",
+                    scene.fade().current(),
+                    scene
+                        .mask()
+                        .map(|mask| (mask.slot, mask.elapsed, mask.duration()))
+                );
+                continue;
+            }
+            if dispatched == Some(cmvs_rs::dispatch::Flow::Done) {
+                use cmvs_rs::dispatch::Capability;
+                let capability = cmvs_rs::dispatch::ROOT
+                    .iter()
+                    .find(|entry| entry.command == command)
+                    .expect("completed root command has an entry")
+                    .capability;
+                match capability {
+                    Capability::Audio => {
+                        if let (
+                            0xb0 | 0xba,
+                            Some(AudioRequest::PlaySe {
+                                channel,
+                                name,
+                                volume,
+                                looped,
+                                ..
+                            }),
+                        ) = (command, audio_backend.requests().last())
+                        {
+                            println!(
+                                "# audio 0x20b0 recorded SE[{channel}]={} volume={volume} loop={looped}; not loaded/played, system_integer[0]={:?}",
+                                name.escape_ascii(),
+                                machine.state().system_integer(0)
+                            );
+                        } else if let (0xb1, Some(AudioRequest::StartSe { channel, looped })) =
+                            (command, audio_backend.requests().last())
+                        {
+                            println!(
+                                "# audio 0x20b1 recorded start SE[{channel}] loop={looped}; no playback, system_integer[0]={:?}",
+                                machine.state().system_integer(0)
+                            );
+                        } else if let (0xb3, Some(AudioRequest::StopSe { channel })) =
+                            (command, audio_backend.requests().last())
+                        {
+                            println!(
+                                "# audio 0x20b3 recorded stop SE[{channel}]; record={:?}, system_integer[0]={:?}",
+                                audio.channel(usize::from(*channel)),
+                                machine.state().system_integer(0)
+                            );
+                        } else if matches!(command, 0xa0..=0xa2 | 0xa4) {
+                            let bgm = audio.bgm();
+                            println!(
+                                "# audio 0x{:04x} BGM channel={} primary={} secondary={} playing={}; last request={:?}; not loaded/played",
+                                command + 0x2000,
+                                bgm.channel,
+                                bgm.primary.escape_ascii(),
+                                bgm.secondary.escape_ascii(),
+                                bgm.playing,
+                                audio_backend.requests().last()
+                            );
+                        }
+                    }
+                    Capability::Timers => println!(
+                        "# timer 0x{:04x}: values={:?} system_integer[0]={:?}",
+                        command + 0x2000,
+                        timers.values(),
+                        machine.state().system_integer(0)
+                    ),
+                    Capability::Flags => println!(
+                        "# message flag 0x{:04x}: skip={} auto_advance={} bypass={}; system_integer[0]={:?}",
+                        command + 0x2000,
+                        message_flags.skip(),
+                        message_flags.auto_advance(),
+                        message_flags.bypass(),
+                        machine.state().system_integer(0)
+                    ),
+                    Capability::Random => println!(
+                        "# rand 0x20d4: system_integer[0]={:?} (explicit research seed)",
+                        machine.state().system_integer(0)
+                    ),
+                    Capability::Settings => println!(
+                        "# configuration 0x{:04x}; system_integer[0]={:?}",
+                        command + 0x2000,
+                        machine.state().system_integer(0)
+                    ),
+                    Capability::History => println!(
+                        "# history entries={} (newest first; no history UI)",
+                        history.entries().len()
+                    ),
+                    Capability::Strings => println!(
+                        "# text 0x{:04x}: system_integer[0]={:?}",
+                        command + 0x2000,
+                        machine.state().system_integer(0)
+                    ),
+                    Capability::SaveTitle => println!(
+                        "# save title 0x2162 = {}; recorded only",
+                        save_title.bytes().escape_ascii()
+                    ),
+                    Capability::EffectObjects => {
+                        println!("# effect object release 0x22a0: no +4024 object is modeled")
+                    }
+                    Capability::Popup => println!(
+                        "# popup menu 0x{:04x}: enabled={}; system_integer[0]={:?}; no native menu",
+                        command + 0x2000,
+                        save_menu.popup_enabled(),
+                        machine.state().system_integer(0)
+                    ),
+                    Capability::Gesture => println!(
+                        "# pointer gesture config 0x{:04x}; fields +0..+36={:?}; state only, no input",
+                        command + 0x2000,
+                        (0..=36)
+                            .step_by(4)
+                            .map(|offset| gesture.field(offset).unwrap_or(0))
+                            .collect::<Vec<_>>()
+                    ),
+                    Capability::FadeWait
+                    | Capability::MaskWait
+                    | Capability::QuakeWait
+                    | Capability::StripWait
+                    | Capability::ChangeWait
+                    | Capability::CameraWait => {}
+                    Capability::Text
+                    | Capability::Math
+                    | Capability::SaveInfo
+                    | Capability::Effects => {
+                        return Err("trace lacks the dispatched capability".into());
+                    }
+                }
+                continue;
+            }
+            // Root commands without an optional host retain the original stop
+            // diagnostics below. A selected research override stops immediately.
+            if matches!(
+                dispatched,
+                Some(cmvs_rs::dispatch::Flow::Unhandled | cmvs_rs::dispatch::Flow::Unavailable)
+            ) && resolved.semantics != cmvs_rs::profile::Semantics::Root
+            {
+                println!(
+                    "# STOP pending system=0x{:04x}; selected text handler needs a text host; PC and parameters preserved; not game completion",
+                    command + 0x2000
+                );
+                return Ok(());
             }
             if save_image.try_handle(&mut machine, continue_without_snapshot)? {
                 println!(
@@ -354,54 +555,6 @@ fn run() -> Result<(), Box<dyn Error>> {
                 continue;
             }
             if let Some(assets) = &mut platform_assets {
-                let gate = SkipGate {
-                    skip: message_flags.skip(),
-                    ..SkipGate::default()
-                };
-                let waited = match scene.fade_mut().try_wait(&mut machine, gate, &mut input)? {
-                    Some(event) => Some(event),
-                    None => match scene.try_wait_mask(&mut machine, gate, &mut input)? {
-                        Some(event) => Some(event),
-                        None => match scene.try_wait_quake(&mut machine)? {
-                            Some(event) => Some(event),
-                            None => scene.try_wait_strip(&mut machine, gate, &mut input)?,
-                        },
-                    },
-                };
-                if let Some(event) = waited {
-                    if event == Step::Yield {
-                        let Some(delta) = frame_ms else {
-                            println!(
-                                "# WAIT fade/mask transition at pc=0x{:x}; PC and stack preserved; supply --frame-ms to advance engine frames",
-                                machine.pc()
-                            );
-                            return Ok(());
-                        };
-                        if let (Some(images), Some(config)) = (&mut images, &bootstrap) {
-                            sequence.advance_frame_with_hosts(
-                                delta,
-                                &mut scene,
-                                &mut images.with_paths(config.paths()),
-                                &mut camera,
-                            )?;
-                        } else {
-                            sequence.advance_frame(delta)?;
-                        }
-                        scene.advance_frame(delta);
-                        camera.advance_frame(delta);
-                        movies.advance(delta);
-                        frame_delta = delta;
-                        resume_run = true;
-                        println!(
-                            "# frame delta_ms={delta} fade={:?} mask={:?}",
-                            scene.fade().current(),
-                            scene
-                                .mask()
-                                .map(|mask| (mask.slot, mask.elapsed, mask.duration()))
-                        );
-                    }
-                    continue;
-                }
                 let cursors = bootstrap
                     .as_ref()
                     .map(Bootstrap::cursor_names)
@@ -473,87 +626,6 @@ fn run() -> Result<(), Box<dyn Error>> {
                     }
                     continue;
                 }
-                if save_title.try_handle(&mut machine)? {
-                    println!(
-                        "# save title 0x2162 = {}; recorded only",
-                        save_title.bytes().escape_ascii()
-                    );
-                    continue;
-                }
-                if text::try_handle(&mut machine)? {
-                    println!(
-                        "# text 0x{:04x}: system_integer[0]={:?}",
-                        command + 0x2000,
-                        machine.state().system_integer(0)
-                    );
-                    continue;
-                }
-                if effect_objects::try_handle(&mut machine)? {
-                    println!("# effect object release 0x22a0: no +4024 object is modeled");
-                    continue;
-                }
-                if audio.try_handle(&mut machine, &mut audio_backend)? {
-                    if let (
-                        0xb0 | 0xba,
-                        Some(AudioRequest::PlaySe {
-                            channel,
-                            name,
-                            volume,
-                            looped,
-                            ..
-                        }),
-                    ) = (command, audio_backend.requests().last())
-                    {
-                        println!(
-                            "# audio 0x20b0 recorded SE[{channel}]={} volume={volume} loop={looped}; not loaded/played, system_integer[0]={:?}",
-                            name.escape_ascii(),
-                            machine.state().system_integer(0)
-                        );
-                    } else if let (0xb1, Some(AudioRequest::StartSe { channel, looped })) =
-                        (command, audio_backend.requests().last())
-                    {
-                        println!(
-                            "# audio 0x20b1 recorded start SE[{channel}] loop={looped}; no playback, system_integer[0]={:?}",
-                            machine.state().system_integer(0)
-                        );
-                    } else if let (0xb3, Some(AudioRequest::StopSe { channel })) =
-                        (command, audio_backend.requests().last())
-                    {
-                        println!(
-                            "# audio 0x20b3 recorded stop SE[{channel}]; record={:?}, system_integer[0]={:?}",
-                            audio.channel(usize::from(*channel)),
-                            machine.state().system_integer(0)
-                        );
-                    } else if matches!(command, 0xa0..=0xa2 | 0xa4) {
-                        let bgm = audio.bgm();
-                        println!(
-                            "# audio 0x{:04x} BGM channel={} primary={} secondary={} playing={}; last request={:?}; not loaded/played",
-                            command + 0x2000,
-                            bgm.channel,
-                            bgm.primary.escape_ascii(),
-                            bgm.secondary.escape_ascii(),
-                            bgm.playing,
-                            audio_backend.requests().last()
-                        );
-                    }
-                    continue;
-                }
-                if save_menu.try_handle_popup(&mut machine)? {
-                    println!(
-                        "# popup menu 0x{:04x}: enabled={}; system_integer[0]={:?}; no native menu",
-                        command + 0x2000,
-                        save_menu.popup_enabled(),
-                        machine.state().system_integer(0)
-                    );
-                    continue;
-                }
-                if history.try_handle(&mut machine)? {
-                    println!(
-                        "# history entries={} (newest first; no history UI)",
-                        history.entries().len()
-                    );
-                    continue;
-                }
                 if camera.try_handle(&mut machine)? {
                     let floats = |c: usize| {
                         camera
@@ -623,36 +695,6 @@ fn run() -> Result<(), Box<dyn Error>> {
                     );
                     continue;
                 }
-                if settings.try_handle(&mut machine)? {
-                    println!(
-                        "# configuration 0x{:04x}; system_integer[0]={:?}",
-                        command + 0x2000,
-                        machine.state().system_integer(0)
-                    );
-                    continue;
-                }
-                if message_flags.try_handle(&mut machine)? {
-                    println!(
-                        "# message flag 0x{:04x}: skip={} auto_advance={} bypass={}; system_integer[0]={:?}",
-                        command + 0x2000,
-                        message_flags.skip(),
-                        message_flags.auto_advance(),
-                        message_flags.bypass(),
-                        machine.state().system_integer(0)
-                    );
-                    continue;
-                }
-                if gesture.try_handle(&mut machine)? {
-                    println!(
-                        "# pointer gesture config 0x{:04x}; fields +0..+36={:?}; state only, no input",
-                        command + 0x2000,
-                        (0..=36)
-                            .step_by(4)
-                            .map(|offset| gesture.field(offset).unwrap_or(0))
-                            .collect::<Vec<_>>()
-                    );
-                    continue;
-                }
                 if scene.try_handle(&mut machine)? {
                     println!(
                         "# scene state 0x{:04x}: {:?} rgba={:?} objects={:?}; recorded only, nothing drawn",
@@ -684,15 +726,6 @@ fn run() -> Result<(), Box<dyn Error>> {
                             wipe.strips.len(),
                             wipe.finished
                         )),
-                        machine.state().system_integer(0)
-                    );
-                    continue;
-                }
-                if timers.try_handle(&mut machine)? {
-                    println!(
-                        "# timer 0x{:04x}: values={:?} system_integer[0]={:?}",
-                        command + 0x2000,
-                        timers.values(),
                         machine.state().system_integer(0)
                     );
                     continue;
@@ -796,15 +829,6 @@ fn run() -> Result<(), Box<dyn Error>> {
                     );
                     continue;
                 }
-            }
-            if let Some(random) = &mut random
-                && random.try_handle(&mut machine)?
-            {
-                println!(
-                    "# rand 0x20d4: system_integer[0]={:?} (explicit research seed)",
-                    machine.state().system_integer(0)
-                );
-                continue;
             }
             if let Some(source) = &mut system_source {
                 let game_id = bootstrap
