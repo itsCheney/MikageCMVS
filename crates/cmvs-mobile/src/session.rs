@@ -96,6 +96,10 @@ pub struct Session {
     /// The VM yielded since the last partial budget slice: the scene is complete.
     frame_ready: bool,
     input_due: bool,
+    /// Last logged [skip, auto advance, bypass, action 7 held (Shift), action 8 held
+    /// (Ctrl)]: what can
+    /// finish a message wait without a click.
+    advance_state: Option<[bool; 5]>,
     status: Status,
 }
 
@@ -206,6 +210,7 @@ impl Session {
             pending_ms: 0,
             frame_ready: false,
             input_due: true,
+            advance_state: None,
             status: Status::Running,
         })
     }
@@ -395,6 +400,7 @@ impl Session {
             // Mid-run: keep the previous frame, continue the VM next step.
             return Status::Running;
         }
+        self.log_advance_state();
         let dt = std::mem::take(&mut self.pending_ms);
         if let Err(e) = self.startup.advance_decoded_frame(dt) {
             return self.fail(e.to_string());
@@ -484,6 +490,31 @@ impl Session {
 /// Host fonts can be large: the PingFang the app rebuilds as TrueType from the
 /// system's outlines is over 32 MB, the limit the desktop font code uses.
 const MAX_FONT: usize = 128 * 1024 * 1024;
+
+impl Session {
+    /// Logs when something besides a click starts finishing message waits.
+    fn log_advance_state(&mut self) {
+        let flags = self.startup.message_flags();
+        let input = self.startup.input();
+        let state = [
+            flags.skip(),
+            flags.auto_advance(),
+            flags.bypass(),
+            input.held(7),
+            input.held(8),
+        ];
+        if Some(state) != self.advance_state {
+            self.advance_state = Some(state);
+            log::emit(
+                log::INFO,
+                &format!(
+                    "message advance: skip={} auto={} bypass={} advance-key={} skip-key={}",
+                    state[0], state[1], state[2], state[3], state[4]
+                ),
+            );
+        }
+    }
+}
 
 fn font_renderer(fonts: &[FontFile]) -> Result<FontRenderer> {
     if fonts.is_empty() {
