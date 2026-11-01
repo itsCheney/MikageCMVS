@@ -1,11 +1,17 @@
 //! Translation patches that hook the engine with a DLL and serve their own
-//! files. Two kinds are read:
+//! files. Three kinds are read, and a game may have several:
 //!
-//! * `Pk/*.pk` (茶组's アマツツミ Chinese patch, `amatsu.dll`), see [`PkPatch`].
+//! * A `patch` folder of loose files named like the game's own (Mikage's
+//!   format for anything unpacked by hand), see [`LoosePatch`]. It wins over
+//!   the others.
+//! * PKP archives (茶组's アマツツミ Chinese patch, `amatsu.dll`, ships them as
+//!   `Pk/*.pk`), see [`PkPatch`].
 //! * `Longinus.dat` (the Longinus hook, used by アオイトリ's Chinese patch),
 //!   see [`LonginusPatch`].
 //!
-//! Both carry GBK text. A `.pk` file is `PKP\0`, a zero word, the entry count, then 0xb0-byte
+//! The archives are found by their content, not their names: any file in the
+//! game folder or one folder below it (except `data` and `savedata`) that
+//! starts with `PKP\0` or `Longinus`. Both known archives carry GBK text. A `.pk` file is `PKP\0`, a zero word, the entry count, then 0xb0-byte
 //! entries: data offset, unpacked size, packed size, 36 zero bytes and a
 //! NUL-padded UTF-16 name. Data is raw DEFLATE. Scripts are PS2A without the
 //! byte obfuscation; images are PNG files named like the PB3 they replace
@@ -22,17 +28,247 @@ use std::{
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
-/// The translation patch of a game, if it has one, and a line for the log.
+/// The translation patches of a game, if it has any, layered as one, and a
+/// line for the log.
 pub fn find(root: &Path) -> Result<Option<(std::sync::Arc<dyn PatchFiles>, String)>> {
-    if let Some(patch) = PkPatch::find(root)? {
-        let line = format!("{} files in Pk", patch.len());
-        return Ok(Some((std::sync::Arc::new(patch), line)));
+    let mut layers: Vec<Box<dyn PatchFiles + Send + Sync>> = Vec::new();
+    let mut lines = Vec::new();
+    if let Some(patch) = LoosePatch::find(root)? {
+        lines.push(format!(
+            "{} files in {}",
+            patch.len(),
+            patch.dir.file_name().unwrap_or_default().to_string_lossy()
+        ));
+        layers.push(Box::new(patch));
     }
-    if let Some(patch) = LonginusPatch::find(root)? {
-        let line = format!("{} files in Longinus.dat", patch.len());
-        return Ok(Some((std::sync::Arc::new(patch), line)));
+    let found = scan(root)?;
+    if !found.pkp.is_empty() {
+        let patch = PkPatch::from_archives(root, found.pkp)?;
+        lines.push(format!("{} files in PKP archives", patch.len()));
+        layers.push(Box::new(patch));
     }
-    Ok(None)
+    if let Some(path) = found.longinus {
+        let patch = LonginusPatch::open(root, path)?;
+        lines.push(format!(
+            "{} files in {}",
+            patch.len(),
+            patch.path.file_name().unwrap_or_default().to_string_lossy()
+        ));
+        layers.push(Box::new(patch));
+    }
+    Ok(match layers.len() {
+        0 => None,
+        1 => {
+            let only: std::sync::Arc<dyn PatchFiles + Send + Sync> =
+                std::sync::Arc::from(layers.pop().expect("one"));
+            Some((only, lines.join("")))
+        }
+        _ => Some((std::sync::Arc::new(Layered(layers)), lines.join(", "))),
+    })
+}
+
+/// Patches tried in order; the first that has a file wins.
+struct Layered(Vec<Box<dyn PatchFiles + Send + Sync>>);
+
+impl PatchFiles for Layered {
+    fn script(&self, name: &[u8]) -> Result<Option<Vec<u8>>> {
+        for layer in &self.0 {
+            if let Some(bytes) = layer.script(name)? {
+                return Ok(Some(bytes));
+            }
+        }
+        Ok(None)
+    }
+    fn image(&self, name: &[u8]) -> Result<Option<Vec<u8>>> {
+        // A whole image of an earlier layer wins over pixels of a later one.
+        for layer in &self.0 {
+            if let Some(bytes) = layer.image(name)? {
+                return Ok(Some(bytes));
+            }
+            if layer.pixels(name)?.is_some() {
+                return Ok(None);
+            }
+        }
+        Ok(None)
+    }
+    fn pixels(&self, name: &[u8]) -> Result<Option<Vec<u8>>> {
+        for layer in &self.0 {
+            if layer.image(name)?.is_some() {
+                return Ok(None);
+            }
+            if let Some(bytes) = layer.pixels(name)? {
+                return Ok(Some(bytes));
+            }
+        }
+        Ok(None)
+    }
+    fn movie_directory(&self) -> Option<&[u8]> {
+        self.0.iter().find_map(|layer| layer.movie_directory())
+    }
+}
+
+#[derive(Default)]
+struct Found {
+    pkp: Vec<PathBuf>,
+    longinus: Option<PathBuf>,
+}
+
+/// Bounds the content scan: game folders hold a few dozen files at the top.
+const MAX_SCANNED: usize = 4096;
+
+/// Patch archives in `root` and its direct subfolders, by their magic.
+fn scan(root: &Path) -> Result<Found> {
+    let mut found = Found::default();
+    let mut dirs = vec![root.to_owned()];
+    for item in std::fs::read_dir(root)? {
+        let item = item?;
+        let skip = item.file_name().to_str().is_some_and(|n| {
+            ["data", "savedata", "save", "patch"]
+                .iter()
+                .any(|d| n.eq_ignore_ascii_case(d))
+        });
+        if item.file_type()?.is_dir() && !skip {
+            dirs.push(item.path());
+        }
+    }
+    let mut scanned = 0;
+    for dir in dirs {
+        let mut files: Vec<PathBuf> = std::fs::read_dir(&dir)?
+            .filter_map(|item| item.ok())
+            .filter(|item| item.file_type().is_ok_and(|t| t.is_file()))
+            .map(|item| item.path())
+            .collect();
+        files.sort();
+        for path in files {
+            scanned += 1;
+            if scanned > MAX_SCANNED {
+                return Ok(found);
+            }
+            let mut head = [0u8; 8];
+            let Ok(mut file) = File::open(&path) else {
+                continue;
+            };
+            if file.read_exact(&mut head).is_err() {
+                continue;
+            }
+            if head.starts_with(b"PKP\0") {
+                found.pkp.push(path);
+            } else if &head == b"Longinus" && found.longinus.is_none() {
+                found.longinus = Some(path);
+            }
+        }
+    }
+    Ok(found)
+}
+
+/// Loose files in `<root>/patch` (any letter case) and its subfolders, named
+/// like the files they replace: scripts `*.ps3` (as in the game's archives,
+/// or decoded), images as the game's own format (`*.pb3`) or as PNG named
+/// after it (`cg_bg.png` for `cg_bg.pb3`), and movies `*.cmv`. Folders only
+/// group files: a name means the same file wherever it sits. GARbro and
+/// similar tools extract the game's and many patches' archives to such files.
+pub struct LoosePatch {
+    dir: PathBuf,
+    /// Lower-case file names.
+    files: HashMap<String, PathBuf>,
+    movies: Option<Vec<u8>>,
+}
+
+/// Bounds the loose folder walk.
+const MAX_LOOSE_FILES: usize = 65536;
+const MAX_LOOSE_DEPTH: usize = 4;
+
+impl LoosePatch {
+    /// `<root>/patch`, or None when the game has none or it is empty.
+    pub fn find(root: &Path) -> Result<Option<Self>> {
+        let Some(dir) = child_ignoring_case(root, "patch", true)? else {
+            return Ok(None);
+        };
+        let mut files = HashMap::new();
+        let mut movies = None;
+        let mut pending = vec![(dir.clone(), 0)];
+        while let Some((current, depth)) = pending.pop() {
+            let mut items: Vec<_> = std::fs::read_dir(&current)?.collect::<std::io::Result<_>>()?;
+            items.sort_by_key(|item| item.file_name());
+            for item in items {
+                let path = item.path();
+                if item.file_type()?.is_dir() {
+                    if depth + 1 < MAX_LOOSE_DEPTH {
+                        pending.push((path, depth + 1));
+                    }
+                    continue;
+                }
+                let Some(name) = item.file_name().to_str().map(str::to_ascii_lowercase) else {
+                    continue;
+                };
+                if files.len() >= MAX_LOOSE_FILES {
+                    return Err(format!("{}: too many files", dir.display()).into());
+                }
+                if movies.is_none() && name.ends_with(".cmv") {
+                    movies = game_relative_dir(root, &current);
+                }
+                files.entry(name).or_insert(path);
+            }
+        }
+        if files.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(Self { dir, files, movies }))
+    }
+
+    pub fn len(&self) -> usize {
+        self.files.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.files.is_empty()
+    }
+
+    fn read(&self, name: &str) -> Result<Option<Vec<u8>>> {
+        match self.files.get(&name.to_ascii_lowercase()) {
+            Some(path) => Ok(Some(std::fs::read(path)?)),
+            None => Ok(None),
+        }
+    }
+}
+
+impl PatchFiles for LoosePatch {
+    fn script(&self, name: &[u8]) -> Result<Option<Vec<u8>>> {
+        match std::str::from_utf8(name) {
+            Ok(name) => self.read(name),
+            Err(_) => Ok(None),
+        }
+    }
+
+    fn image(&self, name: &[u8]) -> Result<Option<Vec<u8>>> {
+        let Ok(name) = std::str::from_utf8(name) else {
+            return Ok(None);
+        };
+        let stem = name.rsplit_once('.').map_or(name, |(stem, _)| stem);
+        if !name.to_ascii_lowercase().ends_with(".png")
+            && let Some(png) = self.read(&format!("{stem}.png"))?
+        {
+            let (image, alpha) =
+                decode_png(&png).map_err(|e| format!("patch image {stem}.png: {e}"))?;
+            return Ok(Some(cmvs_core::patch::raw_image(&image, alpha)));
+        }
+        self.read(name)
+    }
+
+    fn movie_directory(&self) -> Option<&[u8]> {
+        self.movies.as_deref()
+    }
+}
+
+/// `dir` relative to `root` with `\` separators and a trailing `\`, as the
+/// engine names directories.
+fn game_relative_dir(root: &Path, dir: &Path) -> Option<Vec<u8>> {
+    let relative = dir.strip_prefix(root).ok()?;
+    let mut out = Vec::new();
+    for part in relative.components() {
+        out.extend_from_slice(part.as_os_str().to_str()?.as_bytes());
+        out.push(b'\\');
+    }
+    Some(out)
 }
 
 const ENTRY_SIZE: usize = 0xb0;
@@ -53,7 +289,7 @@ pub struct PkPatch {
     archives: Vec<PathBuf>,
     /// Lower-case names; a later archive (by file name) wins.
     entries: BTreeMap<String, Entry>,
-    movies: bool,
+    movies: Option<Vec<u8>>,
 }
 
 impl PkPatch {
@@ -63,19 +299,33 @@ impl PkPatch {
             return Ok(None);
         };
         let mut archives = Vec::new();
-        let mut movies = false;
         for item in std::fs::read_dir(&dir)? {
             let path = item?.path();
-            match extension(&path).as_deref() {
-                Some("pk") => archives.push(path),
-                Some("cmv") => movies = true,
-                _ => {}
+            if extension(&path).as_deref() == Some("pk") {
+                archives.push(path);
             }
         }
         if archives.is_empty() {
             return Ok(None);
         }
-        archives.sort();
+        Self::from_archives(root, archives).map(Some)
+    }
+
+    /// PKP archives found anywhere in the game folder. Subtitled movies are
+    /// looked for next to the first archive.
+    pub fn from_archives(root: &Path, mut archives: Vec<PathBuf>) -> Result<Self> {
+        archives.sort_by_key(|path| path.file_name().map(|n| n.to_owned()));
+        let movies = archives
+            .first()
+            .and_then(|path| path.parent())
+            .filter(|dir| {
+                std::fs::read_dir(dir).is_ok_and(|items| {
+                    items
+                        .flatten()
+                        .any(|item| extension(&item.path()).as_deref() == Some("cmv"))
+                })
+            })
+            .and_then(|dir| game_relative_dir(root, dir));
         let mut entries = BTreeMap::new();
         for (archive, path) in archives.iter().enumerate() {
             for (name, entry) in
@@ -84,11 +334,11 @@ impl PkPatch {
                 entries.insert(name, entry);
             }
         }
-        Ok(Some(Self {
+        Ok(Self {
             archives,
             entries,
             movies,
-        }))
+        })
     }
 
     pub fn len(&self) -> usize {
@@ -137,7 +387,7 @@ impl PatchFiles for PkPatch {
     }
 
     fn movie_directory(&self) -> Option<&[u8]> {
-        self.movies.then_some(b"Pk\\".as_slice())
+        self.movies.as_deref()
     }
 }
 
@@ -165,6 +415,11 @@ impl LonginusPatch {
         let Some(path) = child_ignoring_case(root, "longinus.dat", false)? else {
             return Ok(None);
         };
+        Self::open(root, path).map(Some)
+    }
+
+    /// A Longinus archive at `path`, under any name.
+    pub fn open(root: &Path, path: PathBuf) -> Result<Self> {
         let mut file = File::open(&path)?;
         let length = file.metadata()?.len();
         let mut head = [0u8; 16];
@@ -194,11 +449,11 @@ impl LonginusPatch {
             },
             None => None,
         };
-        Ok(Some(Self {
+        Ok(Self {
             path,
             entries,
             start,
-        }))
+        })
     }
 
     pub fn len(&self) -> usize {
@@ -403,6 +658,82 @@ mod tests {
         std::fs::remove_dir_all(&root).unwrap();
         assert!(PkPatch::find(&root.parent().unwrap().join("no-such-game")).is_err());
     }
+    #[test]
+    fn finds_renamed_archives_and_layers_the_loose_folder_first() {
+        let root = std::env::temp_dir().join(format!("cmvs-loose-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let movies = root.join("Patch").join("Movie");
+        let other = root.join("中文补丁");
+        std::fs::create_dir_all(&movies).unwrap();
+        std::fs::create_dir_all(&other).unwrap();
+        std::fs::create_dir_all(root.join("data").join("pack")).unwrap();
+        // A PKP archive under a name and folder of its own, found by content.
+        archive(
+            &other,
+            "res.bin",
+            &[("main.ps3", b"PS2A pk main"), ("sn1.ps3", b"PS2A pk sn1")],
+        );
+        std::fs::write(other.join("readme.txt"), b"hello").unwrap();
+        let mut png_bytes = Vec::new();
+        {
+            let mut encoder = png::Encoder::new(&mut png_bytes, 1, 1);
+            encoder.set_color(png::ColorType::Rgba);
+            let mut writer = encoder.write_header().unwrap();
+            writer.write_image_data(&[9, 8, 7, 6]).unwrap();
+        }
+        std::fs::write(root.join("Patch").join("MAIN.ps3"), b"PS2A loose main").unwrap();
+        std::fs::write(root.join("Patch").join("title.png"), &png_bytes).unwrap();
+        std::fs::write(root.join("Patch").join("logo.pb3"), b"PB3 bytes").unwrap();
+        std::fs::write(movies.join("op.cmv"), b"").unwrap();
+
+        let (patch, line) = find(&root).unwrap().unwrap();
+        assert_eq!(line, "4 files in Patch, 2 files in PKP archives");
+        assert_eq!(
+            patch.script(b"main.ps3").unwrap().unwrap(),
+            b"PS2A loose main"
+        );
+        assert_eq!(patch.script(b"sn1.ps3").unwrap().unwrap(), b"PS2A pk sn1");
+        assert!(patch.script(b"sn2.ps3").unwrap().is_none());
+        let (image, alpha) =
+            cmvs_core::patch::parse_raw_image(&patch.image(b"title.pb3").unwrap().unwrap())
+                .unwrap();
+        assert!(alpha);
+        assert_eq!(image.pixels(), &[9, 8, 7, 6]);
+        assert_eq!(patch.image(b"LOGO.pb3").unwrap().unwrap(), b"PB3 bytes");
+        assert_eq!(patch.movie_directory(), Some(b"Patch\\Movie\\".as_slice()));
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn whole_images_of_an_earlier_layer_hide_later_pixels() {
+        struct Pixels;
+        impl PatchFiles for Pixels {
+            fn script(&self, _: &[u8]) -> Result<Option<Vec<u8>>> {
+                Ok(None)
+            }
+            fn image(&self, _: &[u8]) -> Result<Option<Vec<u8>>> {
+                Ok(None)
+            }
+            fn pixels(&self, name: &[u8]) -> Result<Option<Vec<u8>>> {
+                Ok((name == b"a.pb3" || name == b"b.pb3").then(|| vec![1]))
+            }
+        }
+        struct Whole;
+        impl PatchFiles for Whole {
+            fn script(&self, _: &[u8]) -> Result<Option<Vec<u8>>> {
+                Ok(None)
+            }
+            fn image(&self, name: &[u8]) -> Result<Option<Vec<u8>>> {
+                Ok((name == b"a.pb3").then(|| vec![2]))
+            }
+        }
+        let layered = Layered(vec![Box::new(Whole), Box::new(Pixels)]);
+        assert_eq!(layered.image(b"a.pb3").unwrap(), Some(vec![2]));
+        assert_eq!(layered.pixels(b"a.pb3").unwrap(), None);
+        assert_eq!(layered.image(b"b.pb3").unwrap(), None);
+        assert_eq!(layered.pixels(b"b.pb3").unwrap(), Some(vec![1]));
+    }
+
     #[test]
     fn longinus_hash_matches_the_hook_log() {
         // CMVS_hook.log of アオイトリ's patch: sn401.ps3|Hash:0x71C45A76.

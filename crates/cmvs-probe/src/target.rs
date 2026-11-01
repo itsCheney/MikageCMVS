@@ -38,7 +38,7 @@ pub mod cap {
     pub const SNAPSHOT_LAYOUT: &str = "snapshot-layout";
     /// A font file was supplied for glyph metrics.
     pub const FONT: &str = "font";
-    /// A translation patch (`Pk/*.pk` or `Longinus.dat`) is served before the game's files, with GBK text.
+    /// A translation patch (`patch/`, PKP archives or `Longinus.dat`) is served before the game's files, with GBK text.
     pub const PATCH: &str = "patch";
 }
 

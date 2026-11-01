@@ -33,8 +33,8 @@ typedef struct {
 } CmvsConfig;
 
 enum {
-    CMVS_ENCODING_AUTOMATIC = 0, /* GBK when the game has a Chinese patch (Pk/
-                                    or Longinus.dat), else Shift-JIS */
+    CMVS_ENCODING_AUTOMATIC = 0, /* GBK when the game has a translation patch
+                                    (see cmvs_open), else Shift-JIS */
     CMVS_ENCODING_SHIFT_JIS = 1,
     CMVS_ENCODING_GBK = 2,
 };
@@ -81,10 +81,13 @@ void cmvs_clear_fonts(void);
 /* Opens and boots a game. NULL on failure (see cmvs_last_error). Games that
  * the engine has not recorded (updated releases, patched copies) still open:
  * the profile is taken from the engine executable in the folder, or the
- * 2016 baseline, and the log says so. A translation patch that hooks the
- * engine with a DLL is read in place of the game's own files: Pk/*.pk
- * (scripts, PNG images) with Pk/*.cmv (movies), or Longinus.dat (scripts,
- * pixels) with data/pack/start.CHS. */
+ * 2016 baseline, and the log says so. Translation patches are read in place
+ * of the game's own files, first one wins: a patch/ folder of loose files
+ * named like the game's (scripts *.ps3, images *.pb3 or *.png, movies
+ * *.cmv, in any subfolder), then PKP archives (as Pk/*.pk, with the .cmv
+ * movies beside them) and Longinus.dat (scripts, pixels, with
+ * data/pack/start.CHS). Archives are recognized by content anywhere in the
+ * game folder or one folder down, under any name. */
 CmvsSession *cmvs_open(const CmvsConfig *config);
 
 /* The game's screen size in pixels (1280 x 720). */

@@ -37,7 +37,8 @@ const STEP_BUDGET: Duration = Duration::from_millis(12);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Encoding {
-    /// GBK when the game has a Chinese patch (`Pk/` or `Longinus.dat`), else Shift-JIS.
+    /// GBK when the game has a translation patch (`patch/`, PKP archives or
+    /// `Longinus.dat`), else Shift-JIS.
     Automatic,
     ShiftJis,
     Gbk,
