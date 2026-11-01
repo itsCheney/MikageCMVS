@@ -14,12 +14,12 @@
 //! belongs to the desktop backend.
 use crate::{
     bytecode::DecodeError,
+    dispatch::Call,
     evaluate::error,
     image::ImageSource,
     input::ActionInput,
     machine::Machine,
     scene::{self, ANIMATION_FRAMES, AnimationFrame, DrawSetter, DrawState, SceneObject},
-    vm::SystemResult,
 };
 use std::{error::Error, sync::Arc};
 mod auxiliary;
@@ -348,16 +348,26 @@ impl MessageHost {
         vm: &mut Machine<'_>,
         input: &ActionInput,
     ) -> Result<bool, DecodeError> {
-        let Some((pc, 0x15f)) = vm.pending_system() else {
+        let Some((pc, command)) = vm.pending_system() else {
             return Ok(false);
         };
-        let slot = window_slot(vm, pc, 0x215f)?;
+        if command != 0x15f {
+            return Ok(false);
+        }
+        self.handle_window_pointer(&mut Call::new(vm, pc, command), input)?;
+        Ok(true)
+    }
+
+    pub(crate) fn handle_window_pointer(
+        &mut self,
+        call: &mut Call<'_, '_>,
+        input: &ActionInput,
+    ) -> Result<(), DecodeError> {
+        let pc = call.pc;
+        let slot = call_window_slot(call)?;
         let mut args = [0i32; 4];
         for (i, arg) in args.iter_mut().enumerate() {
-            *arg = vm
-                .stack()
-                .peek_u32(8 + 4 * i)
-                .map_err(|e| error(pc, 0x215f, e.0))? as i32;
+            *arg = call.argument(8 + 4 * i, window_argument_names(call.command)[1 + i])? as i32;
         }
         let window = self.windows[slot].as_ref().ok_or_else(|| {
             error(
@@ -382,11 +392,12 @@ impl MessageHost {
         let left = x.wrapping_add(window.position[0]);
         let top = y.wrapping_add(window.position[1]);
         let hit = left <= px && top <= py && left.wrapping_add(w) > px && top.wrapping_add(h) > py;
-        vm.complete_system(SystemResult(0x4014))?;
-        vm.state_mut()
+        call.complete(0x4014)?;
+        call.vm
+            .state_mut()
             .set_system_integer(0, u32::from(hit))
             .expect("slot 0 exists");
-        Ok(true)
+        Ok(())
     }
     /// 0x2194 / 0x140078890 -> 0x14005dff0: SP-4 window slot (8 or more, or a missing window,
     /// only sets +12056 bit 0x20000). Results 4 = the last enabled button record under the
@@ -402,10 +413,23 @@ impl MessageHost {
         vm: &mut Machine<'_>,
         input: &mut ActionInput,
     ) -> Result<bool, DecodeError> {
-        let Some((pc, 0x194)) = vm.pending_system() else {
+        let Some((pc, command)) = vm.pending_system() else {
             return Ok(false);
         };
-        let slot = window_slot(vm, pc, 0x2194)?;
+        if command != 0x194 {
+            return Ok(false);
+        }
+        self.handle_window_buttons(&mut Call::new(vm, pc, command), input)?;
+        Ok(true)
+    }
+
+    pub(crate) fn handle_window_buttons(
+        &mut self,
+        call: &mut Call<'_, '_>,
+        input: &mut ActionInput,
+    ) -> Result<(), DecodeError> {
+        let pc = call.pc;
+        let slot = call_window_slot(call)?;
         let window = self.windows[slot]
             .as_ref()
             .ok_or_else(|| error(pc, 0x2194, "missing message window sets an unmodeled flag"))?;
@@ -421,7 +445,7 @@ impl MessageHost {
             scale(px, logical[0], RESEARCH_SCREEN[0]),
             scale(py, logical[1], RESEARCH_SCREEN[1]),
         );
-        vm.complete_system(SystemResult(0x4004))?;
+        call.complete(0x4004)?;
         let window = self.windows[slot].as_mut().expect("checked above");
         let (mut hovered, mut clicked, mut held) = (u32::MAX, 0u32, 0u32);
         if input.pressed(0) {
@@ -459,178 +483,168 @@ impl MessageHost {
         if !input.held(0) {
             window.pressed_button = -1;
         }
-        let state = vm.state_mut();
+        let state = call.vm.state_mut();
         for (index, value) in [(4, hovered), (5, clicked), (6, held)] {
             state
                 .set_system_integer(index, value)
                 .expect("result exists");
         }
-        Ok(true)
+        Ok(())
     }
     pub fn try_handle(&mut self, vm: &mut Machine<'_>) -> Result<bool, DecodeError> {
-        if self.try_auxiliary_motion(vm)? {
+        let Some((pc, command)) = vm.pending_system() else {
+            return Ok(false);
+        };
+        if is_window_command(command) {
+            self.handle_window(&mut Call::new(vm, pc, command))?;
             return Ok(true);
         }
-        if let Some((pc, 0x380)) = vm.pending_system() {
-            return self.create_auxiliary_text(vm, pc).map(|()| true);
+        if is_text_state_command(command) {
+            self.handle_text_state(&mut Call::new(vm, pc, command))?;
+            return Ok(true);
         }
-        if let Some((pc, command @ (0x38b | 0x38c | 0x390 | 0x3a0))) = vm.pending_system()
-            && (command != 0x38b || self.record_output)
-        {
-            return self.auxiliary_content(vm, pc, command).map(|()| true);
-        }
-        if let Some((
-            pc,
-            command @ (0x383 | 0x385 | 0x386 | 0x387 | 0x389 | 0x38e | 0x38f | 0x392 | 0x393
-            | 0x396 | 0x398 | 0x39a | 0x39b | 0x39e),
-        )) = vm.pending_system()
-        {
-            // 0x1400736f0 / 0x140073820 / 0x1400738f0 / 0x1400739c0: independent
-            // and 0x140073bc0: auxiliary text setters; none changes system results.
-            let opcode = 0x2000 + command;
-            let count = match command {
-                0x383 | 0x389 | 0x39e => 3,
-                0x385 | 0x396 | 0x39a => 5,
-                0x386 | 0x398 | 0x39b => 1,
-                0x38e | 0x38f | 0x392 | 0x393 => 2,
-                _ => 4,
-            };
-            let mut args = [0; 5];
-            for (i, arg) in args.iter_mut().take(count).enumerate() {
-                *arg = vm
-                    .stack()
-                    .peek_u32(4 * (i + 1))
-                    .map_err(|e| error(pc, opcode, e.0))?;
-            }
-            let slot = args[0] as usize;
-            if slot >= AUXILIARY_TEXTS {
-                return Err(error(pc, opcode, "auxiliary text group slot outside 0..7"));
-            }
-            if self.auxiliary_texts[slot].is_none() {
-                return Err(error(pc, opcode, "auxiliary text group is not created"));
-            }
-            if command == 0x383
-                && self.auxiliary_texts[slot]
-                    .as_ref()
-                    .expect("validated")
-                    .associated_scene
-                    .is_some()
-            {
-                return Err(error(
+        if command == 0x383 {
+            return match self.handle_auxiliary_scene(&mut Call::new(vm, pc, command), None)? {
+                crate::dispatch::Flow::Done => Ok(true),
+                crate::dispatch::Flow::Unavailable => Err(error(
                     pc,
-                    opcode,
+                    command + 0x2000,
                     "bound auxiliary position requires scene context",
-                ));
-            }
-            vm.complete_system(SystemResult(0x4000 | (count as u16 * 4)))?;
-            let group = self.auxiliary_texts[slot]
-                .as_mut()
-                .expect("validated group");
-            match command {
-                0x383 => group.set_position(args[1], args[2]),
-                0x386 => group.clear_content(),
-                0x39b => {
-                    vm.state_mut()
-                        .set_system_integer(
-                            0,
-                            u32::from(group.word(368).expect("modeled activity") != 0),
-                        )
-                        .expect("result exists");
-                }
-                0x398 | 0x39e => {
-                    let values = if command == 0x398 {
-                        group.position()
-                    } else {
-                        group.clamp_position(args[1], args[2])
-                    };
-                    for (slot, value) in [1, 2].into_iter().zip(values) {
-                        vm.state_mut()
-                            .set_system_integer(slot, value)
-                            .expect("result exists");
-                    }
-                }
-                0x396 => group.set_bounds([args[1], args[2], args[3], args[4]]),
-                0x39a => group.set_position_bounds([args[1], args[2], args[3], args[4]]),
-                0x385 => group.set_layout([args[1], args[2], args[3], args[4]]),
-                0x389 => group.set_colors(args[1], args[2]),
-                0x38e => group.set_field_148(args[1]),
-                0x392 => group.set_field_140(args[1]),
-                0x393 => group.set_field_144(args[1]),
-                0x38f => group.set_layer(args[1]),
-                _ => group.set_text_parameters(args[1], args[2], args[3]),
-            }
-            return Ok(true);
+                )),
+                _ => unreachable!("auxiliary position only completes or lacks scene context"),
+            };
         }
-        if let Some((pc, command @ (0x3b8 | 0x3bb))) = vm.pending_system() {
-            // Present only in 2017+ builds; the profile gate stops them for older ones.
-            return self.auxiliary_rules(vm, pc, command).map(|()| true);
+        if !self.record_output {
+            return Ok(false);
         }
-        if let Some((pc, 0x382)) = vm.pending_system() {
-            // 0x1400735e0 releases +4328 and its owned atlas/list, preserving the
-            // separate +4392 font object and ordinary windows/text objects.
-            let slot = vm.stack().peek_u32(4).map_err(|e| error(pc, 0x2382, e.0))?;
-            if slot >= AUXILIARY_TEXTS as u32 {
-                return Err(error(pc, 0x2382, "auxiliary text group slot outside 0..7"));
-            }
-            vm.complete_system(SystemResult(0x4004))?;
-            self.auxiliary_texts[slot as usize] = None;
-            return Ok(true);
-        }
-        match vm.pending_system() {
-            Some((pc, 0xec)) => self.scale(vm, pc).map(|()| true),
-            Some((pc, 0x141)) => self.destroy(vm, pc).map(|()| true),
-            Some((pc, command @ (0x140 | 0x15d))) => self.create(vm, pc, command).map(|()| true),
-            Some((pc, command @ (0x142..=0x149 | 0x14f | 0x15b))) => {
-                self.set(vm, pc, command).map(|()| true)
-            }
-            Some((pc, command @ (0x178 | 0x17f))) => self.object(vm, pc, command).map(|()| true),
-            Some((pc, 0x17b)) => self.object_presence(vm, pc).map(|()| true),
-            Some((pc, 0x171)) => self.release_image(vm, pc).map(|()| true),
-            Some((pc, 0x179)) => self.destroy_child(vm, pc).map(|()| true),
-            Some((pc, command @ (0x17a | 0x17c | 0x180 | 0x182..=0x186))) => {
-                self.draw(vm, pc, command).map(|()| true)
-            }
-            Some((pc, command @ (0x190..=0x192 | 0x195..=0x197))) => {
-                self.button(vm, pc, command).map(|()| true)
-            }
-            Some((pc, 0x150)) => self.move_window(vm, pc).map(|()| true),
-            Some((pc, 0x18d)) => self.draw_query(vm, pc).map(|()| true),
-            Some((pc, 0x151)) => self.cursor(vm, pc).map(|()| true),
-            Some((pc, 0x155)) => self.glyph_parameter(vm, pc).map(|()| true),
-            Some((pc, 0x11f)) => self.measure(vm, pc).map(|()| true),
-            Some((pc, 0x112)) => self.measure_layout(vm, pc).map(|()| true),
-            Some((pc, 0x119)) => self.encoded_length(vm, pc).map(|()| true),
-            Some((pc, 0x14e)) => self.show(vm, pc).map(|()| true),
-            Some((pc, command @ (0x14b..=0x14d))) => self.presence(vm, pc, command).map(|()| true),
-            Some((pc, command @ (0x14a | 0x15a))) => {
-                self.window_text(vm, pc, command).map(|()| true)
-            }
-            Some((pc, command @ (0x1cf..=0x1d1))) => self.animation(vm, pc, command).map(|()| true),
-            Some((pc, command @ (0x114..=0x117 | 0x11e))) => {
-                self.text_command(vm, pc, command).map(|()| true)
-            }
-            Some((pc, 0x100)) => self.create_text(vm, pc).map(|()| true),
-            Some((pc, 0x10b)) if self.record_output => self.place_text(vm, pc).map(|()| true),
-            Some((pc, 0x154)) if self.record_output => {
-                self.place_window_text(vm, pc).map(|()| true)
-            }
-            Some((pc, command @ (0x101..=0x107 | 0x10c..=0x110 | 0x113 | 0x11a))) => {
-                self.text_setter(vm, pc, command).map(|()| true)
-            }
+        match command {
+            0x10b => self.place_text(vm, pc).map(|()| true),
+            0x154 => self.place_window_text(vm, pc).map(|()| true),
+            0x38b => self
+                .auxiliary_content(&mut Call::new(vm, pc, command))
+                .map(|()| true),
             _ => Ok(false),
         }
     }
+
+    pub(crate) fn handle_text_state(&mut self, call: &mut Call<'_, '_>) -> Result<(), DecodeError> {
+        let (pc, command) = (call.pc, call.command);
+        match command {
+            0x100 => return self.create_text(call),
+            0x101..=0x107 | 0x10c..=0x110 | 0x113 | 0x11a => return self.text_setter(call),
+            0x114..=0x117 | 0x11e => return self.text_command(call),
+            0x112 => return self.measure_layout(call),
+            0x119 => return self.encoded_length(call),
+            0x11f => return self.measure(call),
+            0x380 => return self.create_auxiliary_text(call),
+            0x38c | 0x390 | 0x3a0 => return self.auxiliary_content(call),
+            0x39c | 0x39f => return self.handle_auxiliary_motion(call),
+            // Mikage: 2017 builds; older profiles stop them at their gate.
+            0x3b8 | 0x3bb => return self.auxiliary_rules(call.vm, pc, command),
+            _ => {}
+        }
+        if command == 0x382 {
+            let slot = call.argument(4, "auxiliary slot")?;
+            if slot >= AUXILIARY_TEXTS as u32 {
+                return Err(call.error("auxiliary text group slot outside 0..7"));
+            }
+            call.complete(0x4004)?;
+            self.auxiliary_texts[slot as usize] = None;
+            return Ok(());
+        }
+        // 0x1400736f0 / 0x140073820 / 0x1400738f0 / 0x1400739c0: independent
+        // and 0x140073bc0: auxiliary text setters; none changes system results.
+        let opcode = 0x2000 + command;
+        let count = match command {
+            0x389 | 0x39e => 3,
+            0x385 | 0x396 | 0x39a => 5,
+            0x386 | 0x398 | 0x39b => 1,
+            0x38e | 0x38f | 0x392 | 0x393 => 2,
+            _ => 4,
+        };
+        let mut args = [0; 5];
+        for (i, arg) in args.iter_mut().take(count).enumerate() {
+            *arg = call.argument(4 * (i + 1), text_argument_names(command)[i])?;
+        }
+        let slot = args[0] as usize;
+        if slot >= AUXILIARY_TEXTS {
+            return Err(error(pc, opcode, "auxiliary text group slot outside 0..7"));
+        }
+        if self.auxiliary_texts[slot].is_none() {
+            return Err(error(pc, opcode, "auxiliary text group is not created"));
+        }
+        call.complete(0x4000 | (count as u16 * 4))?;
+        let group = self.auxiliary_texts[slot]
+            .as_mut()
+            .expect("validated group");
+        match command {
+            0x386 => group.clear_content(),
+            0x39b => {
+                call.vm
+                    .state_mut()
+                    .set_system_integer(
+                        0,
+                        u32::from(group.word(368).expect("modeled activity") != 0),
+                    )
+                    .expect("result exists");
+            }
+            0x398 | 0x39e => {
+                let values = if command == 0x398 {
+                    group.position()
+                } else {
+                    group.clamp_position(args[1], args[2])
+                };
+                for (slot, value) in [1, 2].into_iter().zip(values) {
+                    call.vm
+                        .state_mut()
+                        .set_system_integer(slot, value)
+                        .expect("result exists");
+                }
+            }
+            0x396 => group.set_bounds([args[1], args[2], args[3], args[4]]),
+            0x39a => group.set_position_bounds([args[1], args[2], args[3], args[4]]),
+            0x385 => group.set_layout([args[1], args[2], args[3], args[4]]),
+            0x389 => group.set_colors(args[1], args[2]),
+            0x38e => group.set_field_148(args[1]),
+            0x392 => group.set_field_140(args[1]),
+            0x393 => group.set_field_144(args[1]),
+            0x38f => group.set_layer(args[1]),
+            _ => group.set_text_parameters(args[1], args[2], args[3]),
+        }
+        Ok(())
+    }
+
+    pub(crate) fn handle_window(&mut self, call: &mut Call<'_, '_>) -> Result<(), DecodeError> {
+        match call.command {
+            0xec => self.scale(call),
+            0x141 => self.destroy(call),
+            0x140 | 0x15d => self.create(call),
+            0x142..=0x149 | 0x14f | 0x15b => self.set(call),
+            0x178 | 0x17f => self.object(call),
+            0x17b => self.object_presence(call),
+            0x171 => self.release_image(call),
+            0x179 => self.destroy_child(call),
+            0x17a | 0x17c | 0x180 | 0x182..=0x186 => self.draw(call),
+            0x190..=0x192 | 0x195..=0x197 => self.button(call),
+            0x150 => self.move_window(call),
+            0x18d => self.draw_query(call),
+            0x151 => self.cursor(call),
+            0x155 => self.glyph_parameter(call),
+            0x14e => self.show(call),
+            0x14b..=0x14d => self.presence(call),
+            0x14a | 0x15a => self.window_text(call),
+            0x1cf..=0x1d1 => self.animation(call),
+            _ => Err(call.error("unregistered window command")),
+        }
+    }
+
     /// 0x238b text (0x140073a80, returns 0x4008), 0x238c pen (0x140073b00, 0x400c), 0x2390
     /// measurement (0x140073c80, 0x4008; system results 0, 1 and 4) and 0x23a0 motion stop
     /// (0x140074210, 0x4004). SP-4 is the group slot, SP-8 the string or pen x, SP-12 pen y.
     /// A missing group only sets +12056 bit 0x1000, which is not modeled. Text output is
     /// recorded only in the explicit text-recording mode, as for 0x2152.
-    fn auxiliary_content(
-        &mut self,
-        vm: &mut Machine<'_>,
-        pc: usize,
-        command: u16,
-    ) -> Result<(), DecodeError> {
+    fn auxiliary_content(&mut self, call: &mut Call<'_, '_>) -> Result<(), DecodeError> {
+        let (pc, command) = (call.pc, call.command);
         let opcode = 0x2000 + command;
         let count = match command {
             0x38c => 3,
@@ -639,10 +653,7 @@ impl MessageHost {
         };
         let mut args = [0; 3];
         for (i, arg) in args.iter_mut().take(count).enumerate() {
-            *arg = vm
-                .stack()
-                .peek_u32(4 * (i + 1))
-                .map_err(|e| error(pc, opcode, e.0))?;
+            *arg = call.argument(4 * (i + 1), text_argument_names(call.command)[i])?;
         }
         let slot = args[0] as usize;
         let group = self
@@ -658,34 +669,35 @@ impl MessageHost {
             })?;
         match command {
             0x38b => {
-                let text = vm.resolve_string(args[1])?;
+                let text = call.vm.resolve_string(args[1])?;
                 let layout = group.layout(&text).map_err(|why| error(pc, opcode, why))?;
-                vm.complete_system(SystemResult(0x4008))?;
+                call.complete(0x4008)?;
                 self.auxiliary_texts[slot]
                     .as_mut()
                     .expect("validated")
                     .append(layout);
             }
             0x390 => {
-                let text = vm.resolve_string(args[1])?;
+                let text = call.vm.resolve_string(args[1])?;
                 let [lines, widest, last] =
                     group.measure(&text).map_err(|why| error(pc, opcode, why))?;
-                vm.complete_system(SystemResult(0x4008))?;
+                call.complete(0x4008)?;
                 for (index, value) in [(0, lines), (1, widest), (4, last)] {
-                    vm.state_mut()
+                    call.vm
+                        .state_mut()
                         .set_system_integer(index, value)
                         .expect("result exists");
                 }
             }
             0x38c => {
-                vm.complete_system(SystemResult(0x400c))?;
+                call.complete(0x400c)?;
                 self.auxiliary_texts[slot]
                     .as_mut()
                     .expect("validated")
                     .set_cursor(args[1], args[2]);
             }
             _ => {
-                vm.complete_system(SystemResult(0x4004))?;
+                call.complete(0x4004)?;
                 self.auxiliary_texts[slot]
                     .as_mut()
                     .expect("validated")
@@ -729,7 +741,7 @@ impl MessageHost {
             let [lines, widest, last] = group
                 .measure_pixels(&text)
                 .map_err(|why| error(pc, opcode, why))?;
-            vm.complete_system(SystemResult(0x4008))?;
+            vm.complete_system(crate::vm::SystemResult(0x4008))?;
             for (index, value) in [(0, 1), (1, widest), (2, lines), (4, last)] {
                 vm.state_mut()
                     .set_system_integer(index, value)
@@ -745,7 +757,7 @@ impl MessageHost {
         let hanging = set(vm.resolve_string(word(8)?)?.to_vec());
         let inseparable = set(vm.resolve_string(word(12)?)?.to_vec());
         let max_overflow = word(16)? as i32;
-        vm.complete_system(SystemResult(0x4010))?;
+        vm.complete_system(crate::vm::SystemResult(0x4010))?;
         self.auxiliary_texts[slot]
             .as_mut()
             .expect("validated")
@@ -759,22 +771,16 @@ impl MessageHost {
     /// 0x140073280: slot, font name, glyph size, capacity; returns 0x4010 and
     /// system result 0 = object != null. Only the existing explicit default-font
     /// policy is supported; native font discovery and named faces remain errors.
-    fn create_auxiliary_text(
-        &mut self,
-        vm: &mut Machine<'_>,
-        pc: usize,
-    ) -> Result<(), DecodeError> {
+    fn create_auxiliary_text(&mut self, call: &mut Call<'_, '_>) -> Result<(), DecodeError> {
+        let pc = call.pc;
         let mut args = [0; 4];
         for (i, word) in args.iter_mut().enumerate() {
-            *word = vm
-                .stack()
-                .peek_u32(4 * (i + 1))
-                .map_err(|e| error(pc, 0x2380, e.0))?;
+            *word = call.argument(4 * (i + 1), text_argument_names(call.command)[i])?;
         }
         if args[0] >= AUXILIARY_TEXTS as u32 {
             return Err(error(pc, 0x2380, "auxiliary text group slot outside 0..7"));
         }
-        if !vm.resolve_string(args[1])?.is_empty() {
+        if !call.vm.resolve_string(args[1])?.is_empty() {
             return Err(error(
                 pc,
                 0x2380,
@@ -782,8 +788,9 @@ impl MessageHost {
             ));
         }
         let candidate = AuxiliaryText::new(args[2], args[3]).map_err(|e| error(pc, 0x2380, e.0))?;
-        vm.complete_system(SystemResult(0x4010))?;
-        vm.state_mut()
+        call.complete(0x4010)?;
+        call.vm
+            .state_mut()
             .set_system_integer(0, 1)
             .expect("slot 0 exists");
         let slot = args[0] as usize;
@@ -816,9 +823,10 @@ impl MessageHost {
     ///   both pop 16.
     /// - 0x2184: layer (0x14003b0d0, as 0x2047); 0x2186 / 0x140077970: opacity
     ///   (0x14003b0e0, as 0x2048); both pop 12.
-    fn draw(&mut self, vm: &mut Machine<'_>, pc: usize, command: u16) -> Result<(), DecodeError> {
+    fn draw(&mut self, call: &mut Call<'_, '_>) -> Result<(), DecodeError> {
+        let (pc, command) = (call.pc, call.command);
         let op = command + 0x2000;
-        let slot = window_slot(vm, pc, op)?;
+        let slot = call_window_slot(call)?;
         let count = match command {
             0x180 => 0,
             0x182 => 4,
@@ -827,12 +835,9 @@ impl MessageHost {
         };
         let mut args = [0u32; 4];
         for (i, arg) in args.iter_mut().take(count).enumerate() {
-            *arg = vm
-                .stack()
-                .peek_u32(12 + 4 * i)
-                .map_err(|e| error(pc, op, e.0))?;
+            *arg = call.argument(12 + 4 * i, window_argument_names(call.command)[2 + i])?;
         }
-        let child = vm.stack().peek_u32(8).map_err(|e| error(pc, op, e.0))? as i32;
+        let child = call.argument(8, window_argument_names(call.command)[1])? as i32;
         let target = self.windows[slot]
             .as_ref()
             .and_then(|window| window_target(&window.object, child))
@@ -840,7 +845,7 @@ impl MessageHost {
         if !matches!(command, 0x17a | 0x17c | 0x180) && target.draw.is_none() {
             return Err(error(pc, op, "window object has no draw state"));
         }
-        vm.complete_system(SystemResult(0x4008 + 4 * count as u16))?;
+        call.complete(0x4008 + 4 * count as u16)?;
         let window = self.windows[slot].as_mut().expect("checked above");
         let target = window_target_mut(&mut window.object, child).expect("checked above");
         let [a, b, c, d] = args;
@@ -874,14 +879,12 @@ impl MessageHost {
     /// SP-12, which the original does not bound (Rust accepts 0..5); pops 36. 0x2191 stores
     /// the hit rectangle SP-12..SP-24; pops 24. 0x2192 enables the record and shows window
     /// child index + 16 if it exists; pops 8.
-    fn button(&mut self, vm: &mut Machine<'_>, pc: usize, command: u16) -> Result<(), DecodeError> {
+    fn button(&mut self, call: &mut Call<'_, '_>) -> Result<(), DecodeError> {
+        let (pc, command) = (call.pc, call.command);
         let op = command + 0x2000;
-        let slot = window_slot(vm, pc, op)?;
-        let word = |distance| {
-            vm.stack()
-                .peek_u32(distance)
-                .map_err(|e| error(pc, op, e.0))
-        };
+        let slot = call_window_slot(call)?;
+        let mut word =
+            |distance| call.argument(distance, window_argument_names(command)[distance / 4 - 1]);
         let index = word(8)? as i32;
         if index < 0 {
             return Err(error(
@@ -899,7 +902,7 @@ impl MessageHost {
             ));
         }
         if matches!(command, 0x195..=0x197) {
-            return self.button_state(vm, pc, command, slot, index);
+            return self.button_state(call, slot, index);
         }
         let count = match command {
             0x190 => 7,
@@ -917,7 +920,7 @@ impl MessageHost {
                 "window button state outside 0..4 overlaps other record fields",
             ));
         }
-        vm.complete_system(SystemResult(0x4008 + 4 * count as u16))?;
+        call.complete(0x4008 + 4 * count as u16)?;
         let window = self.windows[slot].as_mut().expect("checked above");
         let button = &mut window.buttons[index];
         // The records keep 16-bit words; higher bits of each argument are dropped.
@@ -955,19 +958,10 @@ impl MessageHost {
     /// - 0x211e (0x14005afd0): copies the strings SP-8 and SP-12 into the 64-byte +336 and
     ///   +400 buffers with lstrcpyA, sets +332 = SP-16, clears +464 and the +528/+532 layout
     ///   counters and sets +328 = 1; pops 16.
-    fn text_command(
-        &mut self,
-        vm: &mut Machine<'_>,
-        pc: usize,
-        command: u16,
-    ) -> Result<(), DecodeError> {
+    fn text_command(&mut self, call: &mut Call<'_, '_>) -> Result<(), DecodeError> {
+        let (pc, command) = (call.pc, call.command);
         let op = command + 0x2000;
-        let word = |distance| {
-            vm.stack()
-                .peek_u32(distance)
-                .map_err(|e| error(pc, op, e.0))
-        };
-        let index = word(4)? as i32;
+        let index = call.argument(4, text_argument_names(call.command)[0])? as i32;
         if index < 0 {
             return Err(error(
                 pc,
@@ -977,8 +971,14 @@ impl MessageHost {
         }
         let index = index as usize;
         let rules = if command == 0x11e {
-            let hanging = vm.resolve_string(word(8)?)?;
-            let inseparable = vm.resolve_string(word(12)?)?;
+            let hanging = {
+                let reference = call.argument(8, text_argument_names(call.command)[1])?;
+                call.vm.resolve_string(reference)?
+            };
+            let inseparable = {
+                let reference = call.argument(12, text_argument_names(call.command)[2])?;
+                call.vm.resolve_string(reference)?
+            };
             if hanging.len() >= 64 || inseparable.len() >= 64 {
                 return Err(error(
                     pc,
@@ -987,14 +987,14 @@ impl MessageHost {
                 ));
             }
             Some(LineBreakRules {
-                max_overflow: word(16)? as i32,
+                max_overflow: call.argument(16, text_argument_names(call.command)[3])? as i32,
                 hanging,
                 inseparable,
             })
         } else {
             None
         };
-        let value = word(8)?;
+        let value = call.argument(8, text_argument_names(call.command)[1])?;
         if self.text(index).is_none() {
             return Err(error(
                 pc,
@@ -1002,7 +1002,7 @@ impl MessageHost {
                 "text object index outside 0..11 or without an object sets an unmodeled flag",
             ));
         }
-        vm.complete_system(SystemResult(if rules.is_some() { 0x4010 } else { 0x4008 }))?;
+        call.complete(if rules.is_some() { 0x4010 } else { 0x4008 })?;
         let text = self.texts[index].as_mut().expect("checked above");
         match command {
             0x114 => text.ruby = value != 0,
@@ -1026,13 +1026,9 @@ impl MessageHost {
     /// (+324) sizes the glyph texture in 0x14005a6a0: 0 and 196 (0x215d's value) both give
     /// a 1024x2048 texture; other capacities are rejected because textures are not modeled.
     /// Replacing a text object a window caches (+2528) would leave that window stale.
-    fn create_text(&mut self, vm: &mut Machine<'_>, pc: usize) -> Result<(), DecodeError> {
-        let word = |distance| {
-            vm.stack()
-                .peek_u32(distance)
-                .map_err(|e| error(pc, 0x2100, e.0))
-        };
-        let index = word(4)? as i32;
+    fn create_text(&mut self, call: &mut Call<'_, '_>) -> Result<(), DecodeError> {
+        let pc = call.pc;
+        let index = call.argument(4, text_argument_names(call.command)[0])? as i32;
         if index < 0 {
             return Err(error(
                 pc,
@@ -1048,10 +1044,15 @@ impl MessageHost {
                 "text object index outside 0..11 sets an unmodeled flag",
             ));
         }
-        if !vm.resolve_string(word(8)?)?.is_empty() {
+        if !{
+            let reference = call.argument(8, text_argument_names(call.command)[1])?;
+            call.vm.resolve_string(reference)?
+        }
+        .is_empty()
+        {
             return Err(error(pc, 0x2100, "font face selection is not modeled"));
         }
-        let glyph_capacity = word(12)?;
+        let glyph_capacity = call.argument(12, text_argument_names(call.command)[2])?;
         if !matches!(glyph_capacity, 0 | 196) {
             return Err(error(
                 pc,
@@ -1066,8 +1067,9 @@ impl MessageHost {
                 "replacing a text object a window uses leaves a dangling pointer",
             ));
         }
-        vm.complete_system(SystemResult(0x400c))?;
-        vm.state_mut()
+        call.complete(0x400c)?;
+        call.vm
+            .state_mut()
             .set_system_integer(0, 1)
             .expect("slot 0 exists");
         let face = self.font_slot(index);
@@ -1117,12 +1119,8 @@ impl MessageHost {
     ///   0x210f (0x14005ac30): +132 decoration. 0x2110 (0x14005ac70): +152 layer, also on
     ///   the scene object. 0x2113 (0x14005ac50): +124 outline mode, raw. 0x211a /
     ///   0x140073070 (0x14002e860, as 0x2155): +128 glyph parameter, raw.
-    fn text_setter(
-        &mut self,
-        vm: &mut Machine<'_>,
-        pc: usize,
-        command: u16,
-    ) -> Result<(), DecodeError> {
+    fn text_setter(&mut self, call: &mut Call<'_, '_>) -> Result<(), DecodeError> {
+        let (pc, command) = (call.pc, call.command);
         let op = command + 0x2000;
         let count = match command {
             0x101 | 0x104 => 1,
@@ -1133,10 +1131,7 @@ impl MessageHost {
         };
         let mut words = [0i32; 5];
         for (i, word) in words.iter_mut().take(count).enumerate() {
-            *word = vm
-                .stack()
-                .peek_u32(4 + 4 * i)
-                .map_err(|e| error(pc, op, e.0))? as i32;
+            *word = call.argument(4 + 4 * i, text_argument_names(call.command)[i])? as i32;
         }
         let [index, a, b, c, d] = words;
         if index < 0 {
@@ -1165,7 +1160,7 @@ impl MessageHost {
                     "freeing a text object a window uses leaves a dangling pointer",
                 ));
             }
-            vm.complete_system(SystemResult(0x4004))?;
+            call.complete(0x4004)?;
             self.texts[index] = None;
             return Ok(());
         }
@@ -1177,7 +1172,7 @@ impl MessageHost {
             ));
         }
         let face = if command == 0x106 {
-            let face = vm.resolve_string(a as u32)?;
+            let face = call.vm.resolve_string(a as u32)?;
             if face.len() >= 32 || face.contains(&0) {
                 return Err(error(pc, op, "font face exceeds a LOGFONT name"));
             }
@@ -1193,7 +1188,7 @@ impl MessageHost {
                 Arc::from(face.as_slice())
             }
         });
-        vm.complete_system(SystemResult(0x4000 + 4 * count as u16))?;
+        call.complete(0x4000 + 4 * count as u16)?;
         let text = self.texts[index].as_mut().expect("checked above");
         match command {
             0x102 => text.position = [a, b],
@@ -1254,19 +1249,12 @@ impl MessageHost {
     ///
     /// Stopping (0x21d2 / 0x140026110) is not on the real path yet and stays unhandled;
     /// `advance_frame` runs the per-frame update.
-    fn animation(
-        &mut self,
-        vm: &mut Machine<'_>,
-        pc: usize,
-        command: u16,
-    ) -> Result<(), DecodeError> {
+    fn animation(&mut self, call: &mut Call<'_, '_>) -> Result<(), DecodeError> {
+        let (pc, command) = (call.pc, call.command);
         let op = command + 0x2000;
-        let slot = window_slot(vm, pc, op)?;
-        let word = |distance| {
-            vm.stack()
-                .peek_u32(distance)
-                .map_err(|e| error(pc, op, e.0))
-        };
+        let slot = call_window_slot(call)?;
+        let mut word =
+            |distance| call.argument(distance, window_argument_names(command)[distance / 4 - 1]);
         let child = word(8)? as i32;
         let mut args = [0u32; 9];
         let count = match command {
@@ -1298,7 +1286,7 @@ impl MessageHost {
         if target.draw.is_none() {
             return Err(error(pc, op, "window object has no draw state"));
         }
-        vm.complete_system(SystemResult(0x4008 + 4 * count as u16))?;
+        call.complete(0x4008 + 4 * count as u16)?;
         let window = self.windows[slot].as_mut().expect("checked above");
         let draw = window_target_mut(&mut window.object, child)
             .and_then(|target| target.draw.as_mut())
@@ -1333,20 +1321,14 @@ impl MessageHost {
     ///   yet, so only the pen moves. Pops 4.
     /// - 0x215a / 0x140076b20 -> 0x14005de30: +2472/+2476 = SP-8/SP-12, the switch state 1
     ///   position (the current position is not moved). Pops 12.
-    fn window_text(
-        &mut self,
-        vm: &mut Machine<'_>,
-        pc: usize,
-        command: u16,
-    ) -> Result<(), DecodeError> {
+    fn window_text(&mut self, call: &mut Call<'_, '_>) -> Result<(), DecodeError> {
+        let (pc, command) = (call.pc, call.command);
         let op = command + 0x2000;
-        let slot = window_slot(vm, pc, op)?;
+        let slot = call_window_slot(call)?;
         let point = if command == 0x15a {
-            let word = |distance| {
-                vm.stack()
-                    .peek_u32(distance)
+            let mut word = |distance| {
+                call.argument(distance, window_argument_names(command)[distance / 4 - 1])
                     .map(|value| value as i32)
-                    .map_err(|e| error(pc, op, e.0))
             };
             Some([word(8)?, word(12)?])
         } else {
@@ -1362,7 +1344,7 @@ impl MessageHost {
         if self.texts[text].is_none() {
             return Err(error(pc, op, "message window without its text object"));
         }
-        vm.complete_system(SystemResult(if point.is_some() { 0x400c } else { 0x4004 }))?;
+        call.complete(if point.is_some() { 0x400c } else { 0x4004 })?;
         if let Some(point) = point {
             self.windows[slot]
                 .as_mut()
@@ -1377,19 +1359,21 @@ impl MessageHost {
     }
     /// 0x2119: encoded display-byte count, without layout or text state changes.
     /// Build-specific evidence: docs/games/chronoclock/vm-semantics.md.
-    fn encoded_length(&self, vm: &mut Machine<'_>, pc: usize) -> Result<(), DecodeError> {
+    fn encoded_length(&self, call: &mut Call<'_, '_>) -> Result<(), DecodeError> {
+        let pc = call.pc;
         let fail = |why| error(pc, 0x2119, why);
-        let index = vm.stack().peek_u32(4).map_err(|e| fail(e.0))?;
-        let reference = vm.stack().peek_u32(8).map_err(|e| fail(e.0))?;
-        let bytes = vm.resolve_string(reference)?;
+        let index = call.argument(4, text_argument_names(call.command)[0])?;
+        let reference = call.argument(8, text_argument_names(call.command)[1])?;
+        let bytes = call.vm.resolve_string(reference)?;
         if self.text(index as usize).is_none() {
             return Err(fail(
                 "text count needs an existing text object in slots 0..11",
             ));
         }
         let count = output::encoded_length(&bytes).map_err(fail)?;
-        vm.complete_system(SystemResult(0x4008))?;
-        vm.state_mut()
+        call.complete(0x4008)?;
+        call.vm
+            .state_mut()
             .set_system_integer(0, count)
             .expect("result exists");
         Ok(())
@@ -1397,11 +1381,12 @@ impl MessageHost {
 
     /// 0x140072ed0 -> 0x14005b360: SP-4 text index, SP-8 string reference.
     /// Read-only layout query: results 0/1/4 = lines/max bytes/final bytes; pops 8.
-    fn measure_layout(&mut self, vm: &mut Machine<'_>, pc: usize) -> Result<(), DecodeError> {
+    fn measure_layout(&mut self, call: &mut Call<'_, '_>) -> Result<(), DecodeError> {
+        let pc = call.pc;
         let fail = |why| error(pc, 0x2112, why);
-        let index = vm.stack().peek_u32(4).map_err(|e| fail(e.0))? as usize;
-        let reference = vm.stack().peek_u32(8).map_err(|e| fail(e.0))?;
-        let bytes = vm.resolve_string(reference)?;
+        let index = call.argument(4, text_argument_names(call.command)[0])? as usize;
+        let reference = call.argument(8, text_argument_names(call.command)[1])?;
+        let bytes = call.vm.resolve_string(reference)?;
         let text = self
             .text(index)
             .ok_or_else(|| fail("text layout needs an existing text object in slots 0..11"))?;
@@ -1413,9 +1398,10 @@ impl MessageHost {
                 "text layout ruby group overwrites the caller's stack cookie",
             ));
         }
-        vm.complete_system(SystemResult(0x4008))?;
+        call.complete(0x4008)?;
         for (slot, value) in [(0, counts[0]), (1, counts[1]), (4, counts[2])] {
-            vm.state_mut()
+            call.vm
+                .state_mut()
                 .set_system_integer(slot, value)
                 .expect("known result slot");
         }
@@ -1424,14 +1410,13 @@ impl MessageHost {
 
     /// 0x1400731d0 -> 0x14005ca80: SP-4 text index, SP-8 string reference.
     /// System results 0/1/2/4 = success/max count/lines/last count; pops 8.
-    fn measure(&mut self, vm: &mut Machine<'_>, pc: usize) -> Result<(), DecodeError> {
-        let word = |distance| {
-            vm.stack()
-                .peek_u32(distance)
-                .map_err(|e| error(pc, 0x211f, e.0))
+    fn measure(&mut self, call: &mut Call<'_, '_>) -> Result<(), DecodeError> {
+        let pc = call.pc;
+        let index = call.argument(4, text_argument_names(call.command)[0])? as usize;
+        let bytes = {
+            let reference = call.argument(8, text_argument_names(call.command)[1])?;
+            call.vm.resolve_string(reference)?
         };
-        let index = word(4)? as usize;
-        let bytes = vm.resolve_string(word(8)?)?;
         let text = self.text(index).ok_or_else(|| {
             error(
                 pc,
@@ -1440,13 +1425,14 @@ impl MessageHost {
             )
         })?;
         let (counts, scratch) = measure::measure(text, &bytes).map_err(|e| error(pc, 0x211f, e))?;
-        vm.complete_system(SystemResult(0x4008))?;
+        call.complete(0x4008)?;
         self.texts[index]
             .as_mut()
             .expect("checked above")
             .layout_scratch = scratch;
         for (slot, value) in [(0, 1), (1, counts[0]), (2, counts[1]), (4, counts[2])] {
-            vm.state_mut()
+            call.vm
+                .state_mut()
                 .set_system_integer(slot, value)
                 .expect("known result slot");
         }
@@ -1455,9 +1441,10 @@ impl MessageHost {
     /// 0x140076250 -> 0x14005db60 -> 0x14002e860: SP-4 window slot, SP-8
     /// raw u32 stored at text +128. The wrapper preserves edx despite the decompiler
     /// omitting that parameter. Missing windows set an unmodeled engine error flag.
-    fn glyph_parameter(&mut self, vm: &mut Machine<'_>, pc: usize) -> Result<(), DecodeError> {
-        let slot = window_slot(vm, pc, 0x2155)?;
-        let value = vm.stack().peek_u32(8).map_err(|e| error(pc, 0x2155, e.0))?;
+    fn glyph_parameter(&mut self, call: &mut Call<'_, '_>) -> Result<(), DecodeError> {
+        let pc = call.pc;
+        let slot = call_window_slot(call)?;
+        let value = call.argument(8, window_argument_names(call.command)[1])?;
         let text = self.windows[slot]
             .as_ref()
             .ok_or_else(|| {
@@ -1471,7 +1458,7 @@ impl MessageHost {
         if self.texts[text].is_none() {
             return Err(error(pc, 0x2155, "message window without its text object"));
         }
-        vm.complete_system(SystemResult(0x4008))?;
+        call.complete(0x4008)?;
         self.texts[text]
             .as_mut()
             .expect("checked above")
@@ -1480,9 +1467,10 @@ impl MessageHost {
     }
     /// 0x140076ea0 -> 0x14005ddc0: SP-4 slot, SP-8 f32 scale. Both axes of
     /// the window and text draw state receive it; [0.95, 1.05] snaps to 1.0.
-    fn scale(&mut self, vm: &mut Machine<'_>, pc: usize) -> Result<(), DecodeError> {
-        let slot = window_slot(vm, pc, 0x20ec)?;
-        let raw = vm.stack().peek_u32(8).map_err(|e| error(pc, 0x20ec, e.0))?;
+    fn scale(&mut self, call: &mut Call<'_, '_>) -> Result<(), DecodeError> {
+        let pc = call.pc;
+        let slot = call_window_slot(call)?;
+        let raw = call.argument(8, window_argument_names(call.command)[1])?;
         let window = self.windows[slot].as_ref().ok_or_else(|| {
             error(
                 pc,
@@ -1507,7 +1495,7 @@ impl MessageHost {
         } else {
             raw
         };
-        vm.complete_system(SystemResult(0x4008))?;
+        call.complete(0x4008)?;
         self.windows[slot]
             .as_mut()
             .expect("checked above")
@@ -1526,9 +1514,10 @@ impl MessageHost {
     /// to the window position (0x14005aac0); +8 is cleared again. Pops 8. The original does
     /// not check the window pointer, and for slots >= 8 it sets +12056 bit 0x10000 and still
     /// writes past the table, so both are errors here.
-    fn show(&mut self, vm: &mut Machine<'_>, pc: usize) -> Result<(), DecodeError> {
-        let slot = window_slot(vm, pc, 0x214e)?;
-        let shown = vm.stack().peek_u32(8).map_err(|e| error(pc, 0x214e, e.0))? != 0;
+    fn show(&mut self, call: &mut Call<'_, '_>) -> Result<(), DecodeError> {
+        let pc = call.pc;
+        let slot = call_window_slot(call)?;
+        let shown = call.argument(8, window_argument_names(call.command)[1])? != 0;
         let Some(text) = self.windows[slot].as_ref().map(|window| window.text) else {
             return Err(error(
                 pc,
@@ -1539,7 +1528,7 @@ impl MessageHost {
         if self.texts[text].is_none() {
             return Err(error(pc, 0x214e, "message window without its text object"));
         }
-        vm.complete_system(SystemResult(0x4008))?;
+        call.complete(0x4008)?;
         let window = self.windows[slot].as_mut().expect("checked above");
         if window.visible != shown {
             window.visible = shown;
@@ -1559,17 +1548,14 @@ impl MessageHost {
     /// - 0x214c / 0x1400764e0 -> 0x14005dbc0: for a shown window (+4), +8 = bool(SP-8) and
     ///   the text object and +2520 object are shown exactly when it is clear; a window that
     ///   is not shown is left alone. A missing window only sets the flag. Pops 8.
-    fn presence(
-        &mut self,
-        vm: &mut Machine<'_>,
-        pc: usize,
-        command: u16,
-    ) -> Result<(), DecodeError> {
+    fn presence(&mut self, call: &mut Call<'_, '_>) -> Result<(), DecodeError> {
+        let (pc, command) = (call.pc, call.command);
         let op = command + 0x2000;
-        let slot = window_slot(vm, pc, op)?;
+        let slot = call_window_slot(call)?;
         if command == 0x14b {
-            vm.complete_system(SystemResult(0x4004))?;
-            vm.state_mut()
+            call.complete(0x4004)?;
+            call.vm
+                .state_mut()
                 .set_system_integer(0, u32::from(self.windows[slot].is_some()))
                 .expect("slot 0 exists");
             return Ok(());
@@ -1581,13 +1567,14 @@ impl MessageHost {
                 .as_ref()
                 .ok_or_else(|| error(pc, op, "missing message window sets an unmodeled flag"))?
                 .hidden;
-            vm.complete_system(SystemResult(0x4004))?;
-            vm.state_mut()
+            call.complete(0x4004)?;
+            call.vm
+                .state_mut()
                 .set_system_integer(0, u32::from(hidden))
                 .expect("slot 0 exists");
             return Ok(());
         }
-        let hidden = vm.stack().peek_u32(8).map_err(|e| error(pc, op, e.0))? != 0;
+        let hidden = call.argument(8, window_argument_names(call.command)[1])? != 0;
         let Some(text) = self.windows[slot].as_ref().map(|window| window.text) else {
             return Err(error(
                 pc,
@@ -1598,7 +1585,7 @@ impl MessageHost {
         if self.texts[text].is_none() {
             return Err(error(pc, op, "message window without its text object"));
         }
-        vm.complete_system(SystemResult(0x4008))?;
+        call.complete(0x4008)?;
         let window = self.windows[slot].as_mut().expect("checked above");
         if window.visible {
             window.hidden = hidden;
@@ -1612,9 +1599,10 @@ impl MessageHost {
     /// word 17 (opacity), 1..3 = words 8..10 (position and layer), float results 8/9 =
     /// words 18/19 (scale). Returns 0x4008. A missing window or child only sets a +12056
     /// flag in the original and a missing draw state is dereferenced; both are errors here.
-    fn draw_query(&mut self, vm: &mut Machine<'_>, pc: usize) -> Result<(), DecodeError> {
-        let slot = window_slot(vm, pc, 0x218d)?;
-        let child = vm.stack().peek_u32(8).map_err(|e| error(pc, 0x218d, e.0))? as i32;
+    fn draw_query(&mut self, call: &mut Call<'_, '_>) -> Result<(), DecodeError> {
+        let pc = call.pc;
+        let slot = call_window_slot(call)?;
+        let child = call.argument(8, window_argument_names(call.command)[1])? as i32;
         let window = self.windows[slot]
             .as_ref()
             .ok_or_else(|| error(pc, 0x218d, "missing message window sets an unmodeled flag"))?;
@@ -1631,8 +1619,8 @@ impl MessageHost {
             .as_ref()
             .ok_or_else(|| error(pc, 0x218d, "window object without a draw state"))?
             .words;
-        vm.complete_system(SystemResult(0x4008))?;
-        let state = vm.state_mut();
+        call.complete(0x4008)?;
+        let state = call.vm.state_mut();
         for (index, word) in [(0, 17), (1, 8), (2, 9), (3, 10)] {
             state
                 .set_system_integer(index, words[word])
@@ -1652,12 +1640,11 @@ impl MessageHost {
     /// 0x140078a90: system result 0 = the +72 word; 0x4008.
     fn button_state(
         &mut self,
-        vm: &mut Machine<'_>,
-        pc: usize,
-        command: u16,
+        call: &mut Call<'_, '_>,
         slot: usize,
         index: usize,
     ) -> Result<(), DecodeError> {
+        let (pc, command) = (call.pc, call.command);
         let op = command + 0x2000;
         let window = self.windows[slot].as_mut().expect("checked by the caller");
         let button = &window.buttons[index];
@@ -1665,7 +1652,7 @@ impl MessageHost {
             0x195 => u32::from(button.enabled),
             0x197 => button.state_word & 0xffff,
             _ => {
-                let state = vm.stack().peek_u32(12).map_err(|e| error(pc, op, e.0))? as u16;
+                let state = call.argument(12, window_argument_names(call.command)[2])? as u16;
                 if u32::from(state) != button.state_word & 0xffff {
                     let rect = *button.states.get(usize::from(state)).ok_or_else(|| {
                         error(
@@ -1685,23 +1672,22 @@ impl MessageHost {
                     let button = &mut window.buttons[index];
                     button.state_word = (button.state_word & 0xffff_0000) | u32::from(state);
                 }
-                vm.complete_system(SystemResult(0x400c))?;
+                call.complete(0x400c)?;
                 return Ok(());
             }
         };
-        vm.complete_system(SystemResult(0x4008))?;
-        vm.state_mut()
+        call.complete(0x4008)?;
+        call.vm
+            .state_mut()
             .set_system_integer(0, result)
             .expect("slot 0 exists");
         Ok(())
     }
-    fn cursor(&mut self, vm: &mut Machine<'_>, pc: usize) -> Result<(), DecodeError> {
-        let slot = window_slot(vm, pc, 0x2151)?;
-        let word = |distance| {
-            vm.stack()
-                .peek_u32(distance)
-                .map_err(|e| error(pc, 0x2151, e.0))
-        };
+    fn cursor(&mut self, call: &mut Call<'_, '_>) -> Result<(), DecodeError> {
+        let (pc, command) = (call.pc, call.command);
+        let slot = call_window_slot(call)?;
+        let mut word =
+            |distance| call.argument(distance, window_argument_names(command)[distance / 4 - 1]);
         let (mode, x, y) = (
             word(8)? as u16,
             word(12)? as u16 as i16,
@@ -1714,7 +1700,7 @@ impl MessageHost {
                 "message window slot without a window sets an unmodeled flag",
             ));
         }
-        vm.complete_system(SystemResult(0x4010))?;
+        call.complete(0x4010)?;
         let window = self.windows[slot].as_mut().expect("checked above");
         window.cursor_mode = mode;
         match mode {
@@ -1724,13 +1710,11 @@ impl MessageHost {
         }
         Ok(())
     }
-    fn move_window(&mut self, vm: &mut Machine<'_>, pc: usize) -> Result<(), DecodeError> {
-        let slot = window_slot(vm, pc, 0x2150)?;
-        let word = |distance| {
-            vm.stack()
-                .peek_u32(distance)
-                .map_err(|e| error(pc, 0x2150, e.0))
-        };
+    fn move_window(&mut self, call: &mut Call<'_, '_>) -> Result<(), DecodeError> {
+        let (pc, command) = (call.pc, call.command);
+        let slot = call_window_slot(call)?;
+        let mut word =
+            |distance| call.argument(distance, window_argument_names(command)[distance / 4 - 1]);
         let (mode, x, y) = (word(8)?, word(12)? as i32, word(16)? as i32);
         let window = self.windows[slot].as_ref().ok_or_else(|| {
             error(
@@ -1759,7 +1743,7 @@ impl MessageHost {
         if self.texts[window.text].is_none() {
             return Err(error(pc, 0x2150, "message window without its text object"));
         }
-        vm.complete_system(SystemResult(0x4010))?;
+        call.complete(0x4010)?;
         let window = self.windows[slot].as_mut().expect("checked above");
         window.position = point;
         window.switch_positions[0] = point;
@@ -1776,10 +1760,11 @@ impl MessageHost {
             .position = point;
         Ok(())
     }
-    fn object(&mut self, vm: &mut Machine<'_>, pc: usize, command: u16) -> Result<(), DecodeError> {
+    fn object(&mut self, call: &mut Call<'_, '_>) -> Result<(), DecodeError> {
+        let (pc, command) = (call.pc, call.command);
         let op = command + 0x2000;
-        let slot = window_slot(vm, pc, op)?;
-        let child = vm.stack().peek_u32(8).map_err(|e| error(pc, op, e.0))? as i32;
+        let slot = call_window_slot(call)?;
+        let child = call.argument(8, window_argument_names(call.command)[1])? as i32;
         let window = self.windows[slot].as_ref().ok_or_else(|| {
             error(
                 pc,
@@ -1796,7 +1781,7 @@ impl MessageHost {
             }
             _ => return Err(error(pc, op, "window child outside 0..767 or missing")),
         };
-        vm.complete_system(SystemResult(0x4008))?;
+        call.complete(0x4008)?;
         let object = &mut self.windows[slot].as_mut().expect("checked above").object;
         match (command, child) {
             (0x178, None) => {
@@ -1834,9 +1819,10 @@ impl MessageHost {
     /// A negative child frees the +2520 object and leaves its pointer null, which
     /// `MessageWindow` cannot represent, so it stays an error. Missing windows only set
     /// +12056 bit 0x10000.
-    fn destroy_child(&mut self, vm: &mut Machine<'_>, pc: usize) -> Result<(), DecodeError> {
-        let slot = window_slot(vm, pc, 0x2179)?;
-        let child = vm.stack().peek_u32(8).map_err(|e| error(pc, 0x2179, e.0))? as i32;
+    fn destroy_child(&mut self, call: &mut Call<'_, '_>) -> Result<(), DecodeError> {
+        let pc = call.pc;
+        let slot = call_window_slot(call)?;
+        let child = call.argument(8, window_argument_names(call.command)[1])? as i32;
         if self.windows[slot].is_none() {
             return Err(error(
                 pc,
@@ -1851,7 +1837,7 @@ impl MessageHost {
                 "freeing the window's own object leaves an unmodeled null object",
             ));
         }
-        vm.complete_system(SystemResult(0x4008))?;
+        call.complete(0x4008)?;
         let object = &mut self.windows[slot].as_mut().expect("checked above").object;
         if let Ok(id) = u16::try_from(child)
             && id < 768
@@ -1863,9 +1849,10 @@ impl MessageHost {
     /// 0x217b / 0x1400772d0 -> 0x14005d280: tests the window's own object
     /// (negative child) or a child pointer, regardless of image, visibility or draw state.
     /// Existing window with missing/out-of-range child returns 0, not an error.
-    fn object_presence(&mut self, vm: &mut Machine<'_>, pc: usize) -> Result<(), DecodeError> {
-        let slot = window_slot(vm, pc, 0x217b)?;
-        let child = vm.stack().peek_u32(8).map_err(|e| error(pc, 0x217b, e.0))? as i32;
+    fn object_presence(&mut self, call: &mut Call<'_, '_>) -> Result<(), DecodeError> {
+        let pc = call.pc;
+        let slot = call_window_slot(call)?;
+        let child = call.argument(8, window_argument_names(call.command)[1])? as i32;
         let window = self.windows[slot].as_ref().ok_or_else(|| {
             error(
                 pc,
@@ -1874,8 +1861,9 @@ impl MessageHost {
             )
         })?;
         let exists = window_target(&window.object, child).is_some();
-        vm.complete_system(SystemResult(0x4008))?;
-        vm.state_mut()
+        call.complete(0x4008)?;
+        call.vm
+            .state_mut()
             .set_system_integer(0, u32::from(exists))
             .expect("slot 0 exists");
         Ok(())
@@ -1883,8 +1871,9 @@ impl MessageHost {
 
     /// 0x2171 / 0x140076fd0 -> 0x14003aa30: releases only +6176 on the
     /// window's +2520 object. Children, draw state, text and visibility are retained.
-    fn release_image(&mut self, vm: &mut Machine<'_>, pc: usize) -> Result<(), DecodeError> {
-        let slot = window_slot(vm, pc, 0x2171)?;
+    fn release_image(&mut self, call: &mut Call<'_, '_>) -> Result<(), DecodeError> {
+        let pc = call.pc;
+        let slot = call_window_slot(call)?;
         if self.windows[slot].is_none() {
             return Err(error(
                 pc,
@@ -1892,7 +1881,7 @@ impl MessageHost {
                 "message window slot without a window sets an unmodeled flag",
             ));
         }
-        vm.complete_system(SystemResult(0x4004))?;
+        call.complete(0x4004)?;
         self.windows[slot].as_mut().expect("validated").object.image = None;
         Ok(())
     }
@@ -1906,9 +1895,22 @@ impl MessageHost {
         vm: &mut Machine<'_>,
         images: &mut dyn ImageSource,
     ) -> Result<bool, Box<dyn Error>> {
-        if let Some((pc, 0x397)) = vm.pending_system() {
-            let slot = vm.stack().peek_u32(4).map_err(|e| error(pc, 0x2397, e.0))? as usize;
-            let raw = vm.stack().peek_u32(8).map_err(|e| error(pc, 0x2397, e.0))?;
+        let Some((pc, command @ (0x170 | 0x397))) = vm.pending_system() else {
+            return Ok(false);
+        };
+        self.handle_window_image(&mut Call::new(vm, pc, command), images)?;
+        Ok(true)
+    }
+
+    pub(crate) fn handle_window_image(
+        &mut self,
+        call: &mut Call<'_, '_>,
+        images: &mut dyn ImageSource,
+    ) -> Result<(), Box<dyn Error>> {
+        let pc = call.pc;
+        if call.command == 0x397 {
+            let slot = call.argument(4, window_argument_names(call.command)[0])? as usize;
+            let raw = call.argument(8, window_argument_names(call.command)[1])?;
             if slot >= AUXILIARY_TEXTS || self.auxiliary_texts[slot].is_none() {
                 return Err(error(
                     pc,
@@ -1917,10 +1919,10 @@ impl MessageHost {
                 )
                 .into());
             }
-            let name = vm.resolve_string(raw)?;
+            let name = call.vm.resolve_string(raw)?;
             let image = scene::load_image(images, name, pc, 0x2397)?
                 .ok_or_else(|| error(pc, 0x2397, "auxiliary second texture is missing"))?;
-            vm.complete_system(SystemResult(0x4008))?;
+            call.complete(0x4008)?;
             // 0x14002e4e0: 0x14003b170 sets the atlas draw state's +88 to 4 before the load.
             let group = self.auxiliary_texts[slot]
                 .as_mut()
@@ -1932,14 +1934,11 @@ impl MessageHost {
                 .expect("owned atlas draw state")
                 .texture_mode = 4;
             group.secondary_image = Some(image);
-            return Ok(true);
+            return Ok(());
         }
-        let Some((pc, 0x170)) = vm.pending_system() else {
-            return Ok(false);
-        };
-        let slot = window_slot(vm, pc, 0x2170)?;
-        let raw = vm.stack().peek_u32(8).map_err(|e| error(pc, 0x2170, e.0))?;
-        let name = vm.resolve_string(raw)?;
+        let slot = call_window_slot(call)?;
+        let raw = call.argument(8, window_argument_names(call.command)[1])?;
+        let name = call.vm.resolve_string(raw)?;
         if self.windows[slot].is_none() {
             return Err(error(
                 pc,
@@ -1955,13 +1954,13 @@ impl MessageHost {
                 "window image decode failure sets an unmodeled flag",
             )
         })?;
-        vm.complete_system(SystemResult(0x4008))?;
+        call.complete(0x4008)?;
         self.windows[slot]
             .as_mut()
             .expect("checked above")
             .object
             .image = Some(image);
-        Ok(true)
+        Ok(())
     }
     /// 0x215b / 0x140076b80 and 0x2142..0x2149 / 0x140076060..0x140076370: SP-4 window
     /// slot (signed < 8, window present, otherwise only +12056 bit 0x10000 is set), then
@@ -1975,9 +1974,10 @@ impl MessageHost {
     /// - 0x2147: +144 (0x14002e850); 0x2148: +136/+140 (0x14005ac40); 0x2149: +132.
     /// - 0x214f / 0x1400765e0 -> 0x14005db80 -> 0x14005ac20: cursor +156/+160 =
     ///   SP-8/SP-12, unconditionally; area and window position stay unchanged. Pops 12.
-    fn set(&mut self, vm: &mut Machine<'_>, pc: usize, command: u16) -> Result<(), DecodeError> {
+    fn set(&mut self, call: &mut Call<'_, '_>) -> Result<(), DecodeError> {
+        let (pc, command) = (call.pc, call.command);
         let op = command + 0x2000;
-        let slot = window_slot(vm, pc, op)?;
+        let slot = call_window_slot(call)?;
         let Some(text_index) = self.windows[slot].as_ref().map(|window| window.text) else {
             return Err(error(
                 pc,
@@ -1992,15 +1992,12 @@ impl MessageHost {
         };
         let mut args = [0i32; 4];
         for (i, arg) in args.iter_mut().take(count).enumerate() {
-            *arg = vm
-                .stack()
-                .peek_u32(8 + 4 * i)
-                .map_err(|e| error(pc, op, e.0))? as i32;
+            *arg = call.argument(8 + 4 * i, window_argument_names(call.command)[1 + i])? as i32;
         }
         let Some(text) = self.texts[text_index].as_mut() else {
             return Err(error(pc, op, "message window without its text object"));
         };
-        vm.complete_system(SystemResult(0x4004 + 4 * count as u16))?;
+        call.complete(0x4004 + 4 * count as u16)?;
         let [a, b, c, d] = args;
         match command {
             0x15b => {
@@ -2045,9 +2042,9 @@ impl MessageHost {
     /// in the +1976 table) and clears the slot; empty slots change nothing. Returns 0x4004.
     /// Slots >= 8 only set +12056 bit 0x10000 (unmodeled); negative slots would index
     /// before the table.
-    fn destroy(&mut self, vm: &mut Machine<'_>, pc: usize) -> Result<(), DecodeError> {
-        let slot = window_slot(vm, pc, 0x2141)?;
-        vm.complete_system(SystemResult(0x4004))?;
+    fn destroy(&mut self, call: &mut Call<'_, '_>) -> Result<(), DecodeError> {
+        let slot = call_window_slot(call)?;
+        call.complete(0x4004)?;
         if let Some(window) = self.windows[slot].take() {
             self.texts[window.text] = None;
         }
@@ -2059,14 +2056,13 @@ impl MessageHost {
     /// new index, creates the font object there if absent, then builds the text object and
     /// the window. Returns 0x4020. Out-of-range indices only set +12056 bits 0x10000 and
     /// 0x1000 (unmodeled).
-    fn create(&mut self, vm: &mut Machine<'_>, pc: usize, command: u16) -> Result<(), DecodeError> {
+    fn create(&mut self, call: &mut Call<'_, '_>) -> Result<(), DecodeError> {
+        let (pc, command) = (call.pc, call.command);
         let op = command + 0x2000;
-        let slot = window_slot(vm, pc, op)?;
-        let word = |distance| {
-            vm.stack()
-                .peek_u32(distance)
+        let slot = call_window_slot(call)?;
+        let mut word = |distance| {
+            call.argument(distance, window_argument_names(command)[distance / 4 - 1])
                 .map(|value| value as i32)
-                .map_err(|e| error(pc, op, e.0))
         };
         let text = word(8)?;
         if text < 0 {
@@ -2084,7 +2080,7 @@ impl MessageHost {
                 "text object index outside 0..11 sets an unmodeled flag",
             ));
         }
-        let [x, y, width, height] = [12, 16, 20, 24].map(word);
+        let [x, y, width, height] = [12, 16, 20, 24].map(&mut word);
         let (position, size) = ([x?, y?], [width?, height?]);
         let logical_size = if command == 0x140 {
             RESEARCH_SCREEN.map(|v| v as i32)
@@ -2101,7 +2097,7 @@ impl MessageHost {
                 "replacing a text object another window uses leaves a dangling pointer",
             ));
         }
-        vm.complete_system(SystemResult(if command == 0x140 { 0x4018 } else { 0x4020 }))?;
+        call.complete(if command == 0x140 { 0x4018 } else { 0x4020 })?;
         let face = self.font_slot(text);
         self.font_bold[text] = self.output_settings.bold;
         // 0x14005d3b0's setter calls override the constructor values (e.g. +144 30 -> 100).
@@ -2173,6 +2169,14 @@ fn window_target_mut(object: &mut SceneObject, child: i32) -> Option<&mut SceneO
 /// SP-4 compared signed against 8, as all window handlers do.
 fn window_slot(vm: &Machine<'_>, pc: usize, op: u16) -> Result<usize, DecodeError> {
     let slot = vm.stack().peek_u32(4).map_err(|e| error(pc, op, e.0))? as i32;
+    checked_window_slot(slot as u32, pc, op)
+}
+fn call_window_slot(call: &mut Call<'_, '_>) -> Result<usize, DecodeError> {
+    let slot = call.argument(4, "window slot")?;
+    checked_window_slot(slot, call.pc, call.command + 0x2000)
+}
+fn checked_window_slot(raw: u32, pc: usize, op: u16) -> Result<usize, DecodeError> {
+    let slot = raw as i32;
     if slot < 0 {
         return Err(error(
             pc,
@@ -2230,5 +2234,163 @@ impl MessageHost {
         self.texts = texts;
         self.windows = windows;
         self.auxiliary_texts = Default::default();
+    }
+}
+
+fn is_window_command(command: u16) -> bool {
+    matches!(command, 0xec | 0x140..=0x151 | 0x155 | 0x15a | 0x15b | 0x15d | 0x171 | 0x178..=0x17c | 0x17f | 0x180 | 0x182..=0x186 | 0x18d | 0x190..=0x192 | 0x195..=0x197 | 0x1cf..=0x1d1)
+}
+fn window_argument_names(command: u16) -> &'static [&'static str] {
+    match command {
+        0x140 => &["window slot", "text slot", "x", "y", "width", "height"],
+        0x15d => &[
+            "window slot",
+            "text slot",
+            "x",
+            "y",
+            "width",
+            "height",
+            "logical width",
+            "logical height",
+        ],
+        0x141 | 0x14a | 0x14b | 0x171 | 0x194 => &["window slot"],
+        0xec => &["window slot", "scale"],
+        0x142 => &["window slot", "layer"],
+        0x143 => &["window slot", "glyph size"],
+        0x144 => &["window slot", "character spacing", "line spacing"],
+        0x145 => &["window slot", "left", "top", "right", "bottom"],
+        0x146 => &["window slot", "text color", "decoration color"],
+        0x147 => &["window slot", "character delay"],
+        0x148 => &["window slot", "reveal mode", "reveal interval"],
+        0x149 => &["window slot", "decoration"],
+        0x14c => &["window slot", "hidden"],
+        0x14d => &["window slot"],
+        0x14e => &["window slot", "shown"],
+        0x14f | 0x15a => &["window slot", "x", "y"],
+        0x150 => &["window slot", "mode", "x", "y"],
+        0x151 => &["window slot", "mode", "x", "y"],
+        0x155 => &["window slot", "glyph parameter"],
+        0x15b => &["window slot", "position switch"],
+        0x15f => &["window slot", "left", "top", "width", "height"],
+        0x170 => &["window slot", "image name"],
+        0x397 => &["auxiliary slot", "image name"],
+        0x178 | 0x179 | 0x17b | 0x17f | 0x180 | 0x18d | 0x1cf => &["window slot", "child slot"],
+        0x17a => &["window slot", "child slot", "shown"],
+        0x17c => &["window slot", "child slot", "width", "height"],
+        0x182 => &[
+            "window slot",
+            "child slot",
+            "source x",
+            "source y",
+            "width",
+            "height",
+        ],
+        0x183 | 0x185 => &["window slot", "child slot", "x", "y"],
+        0x184 => &["window slot", "child slot", "layer"],
+        0x186 => &["window slot", "child slot", "opacity"],
+        0x190 => &[
+            "window slot",
+            "button index",
+            "state",
+            "source x",
+            "source y",
+            "width",
+            "height",
+            "origin x",
+            "origin y",
+        ],
+        0x191 => &[
+            "window slot",
+            "button index",
+            "left",
+            "top",
+            "width",
+            "height",
+        ],
+        0x192 | 0x195 | 0x197 => &["window slot", "button index"],
+        0x196 => &["window slot", "button index", "state"],
+        0x1d0 => &[
+            "window slot",
+            "child slot",
+            "frame",
+            "next frame",
+            "duration",
+            "source x",
+            "source y",
+            "width",
+            "height",
+            "origin x",
+            "origin y",
+        ],
+        0x1d1 => &["window slot", "child slot", "start frame"],
+        _ => unreachable!("registered window argument schema"),
+    }
+}
+
+fn is_text_state_command(command: u16) -> bool {
+    matches!(command, 0x100..=0x107 | 0x10c..=0x110 | 0x112..=0x117 | 0x119..=0x11a | 0x11e..=0x11f | 0x380 | 0x382 | 0x385..=0x387 | 0x389 | 0x38c | 0x38e..=0x390 | 0x392..=0x393 | 0x396 | 0x398 | 0x39a..=0x39c | 0x39e..=0x3a0 | 0x3b8 | 0x3bb)
+}
+pub(super) fn text_argument_names(command: u16) -> &'static [&'static str] {
+    match command {
+        0x100 => &["text slot", "font face", "glyph capacity"],
+        0x101 | 0x104 => &["text slot"],
+        0x102 | 0x10c => &["text slot", "x", "y"],
+        0x103 => &["text slot", "left", "top", "right", "bottom"],
+        0x105 => &[
+            "text slot",
+            "glyph size",
+            "character spacing",
+            "line spacing",
+        ],
+        0x106 => &["text slot", "font face"],
+        0x107 => &["text slot", "text color", "decoration color"],
+        0x10d => &["text slot", "reveal mode", "reveal interval"],
+        0x10e => &["text slot", "character delay"],
+        0x10f => &["text slot", "decoration"],
+        0x110 => &["text slot", "layer"],
+        0x113 => &["text slot", "outline mode"],
+        0x114 | 0x117 => &["text slot", "ruby enabled"],
+        0x115 => &["text slot", "ruby size"],
+        0x116 => &["text slot", "ruby spacing"],
+        0x11a => &["text slot", "glyph parameter"],
+        0x112 | 0x119 | 0x11f => &["text slot", "text"],
+        0x11e => &[
+            "text slot",
+            "hanging characters",
+            "inseparable characters",
+            "max overflow",
+        ],
+        0x380 => &[
+            "auxiliary slot",
+            "font face",
+            "glyph size",
+            "glyph capacity",
+        ],
+        0x382 | 0x386 | 0x398 | 0x39b | 0x3a0 => &["auxiliary slot"],
+        0x383 | 0x38c | 0x39e => &["auxiliary slot", "x", "y"],
+        0x385 => &["auxiliary slot", "x", "y", "width", "height"],
+        0x387 => &[
+            "auxiliary slot",
+            "glyph size",
+            "character spacing",
+            "line spacing",
+        ],
+        0x389 => &["auxiliary slot", "text color", "decoration color"],
+        0x38b | 0x390 => &["auxiliary slot", "text"],
+        0x38e => &["auxiliary slot", "gradient"],
+        0x38f => &["auxiliary slot", "layer"],
+        0x392 => &["auxiliary slot", "outline mode"],
+        0x393 => &["auxiliary slot", "outline color"],
+        0x396 | 0x39a => &["auxiliary slot", "left", "right", "top", "bottom"],
+        0x39c => &["auxiliary slot", "delta x", "delta y", "duration"],
+        0x39f => &[
+            "auxiliary slot",
+            "mode",
+            "delta x",
+            "delta y",
+            "extra",
+            "duration",
+        ],
+        _ => unreachable!("registered text argument schema"),
     }
 }

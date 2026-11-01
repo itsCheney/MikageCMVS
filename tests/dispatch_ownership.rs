@@ -56,7 +56,66 @@ impl cmvs_rs::movie::MovieSource for Unavailable {
 fn audit(handler: &str, mut probe: impl FnMut(&mut Machine<'_>) -> bool) {
     let recognizes = |number| {
         use cmvs_rs::dispatch::Capability;
+        if handler == "input::try_handle" {
+            return number == 0x34d
+                || cmvs_rs::dispatch::ROOT.iter().any(|e| {
+                    e.command == number && e.capability == Capability::Input && e.command != 0x2ef
+                });
+        }
+        if handler == "input::try_handle_skipping" {
+            return number == 0x2ef;
+        }
+        if handler == "message::try_handle" {
+            return cmvs_rs::dispatch::ROOT.iter().any(|entry| {
+                entry.command == number
+                    && (matches!(
+                        entry.capability,
+                        Capability::Windows | Capability::TextState
+                    ) || matches!(number, 0x10b | 0x154 | 0x38b | 0x383))
+            });
+        }
+        if handler == "message::try_record_poll" {
+            return number == 0x159;
+        }
+        if handler == "bootstrap::try_handle" {
+            return cmvs_rs::dispatch::ROOT.iter().any(|e| {
+                e.command == number
+                    && matches!(
+                        e.capability,
+                        Capability::Bootstrap | Capability::FunctionKeys
+                    )
+            });
+        }
         let capability = match handler {
+            "message::try_wait_with_auto" => Some(Capability::MessageWait),
+            "snapshot::SaveImage::try_handle" => Some(Capability::Snapshot),
+            "script_control::try_handle" => Some(Capability::ScriptControl),
+            "system_save::try_handle" => Some(Capability::SystemRead),
+            "system_save::try_write" => Some(Capability::SystemWrite),
+            "save_menu::try_handle" => Some(Capability::SaveMenu),
+            "platform::try_handle" => Some(Capability::Platform),
+            "capture::try_handle" => Some(Capability::Capture),
+            "capture::try_immediate" => Some(Capability::CaptureDevice),
+            "movie::try_create_scene" => Some(Capability::MovieScene),
+            "movie::try_start_scene" => Some(Capability::MovieStart),
+            "movie::try_handle" => Some(Capability::MovieState),
+            "movie::try_handle_player" => Some(Capability::MoviePlayer),
+            "sequence::try_handle_with_hosts" => Some(Capability::Sequence),
+            "scene::try_handle_quake" => Some(Capability::Quake),
+            "scene::try_handle_strip" => Some(Capability::Strip),
+            "scene::try_handle_image" => Some(Capability::SceneImages),
+            "scene::try_handle_mask" => Some(Capability::MaskImages),
+            "scene::try_change_image" => Some(Capability::ImageChange),
+            "scene::try_handle" => Some(Capability::Scene),
+            "camera::try_handle" => Some(Capability::Camera),
+            "buttons::try_handle" => Some(Capability::Buttons),
+            "buttons::try_handle_input" => Some(Capability::ButtonInput),
+            "buttons::try_handle_list_input" => Some(Capability::ListInput),
+            "gesture::try_handle_drag_press" => Some(Capability::DragPress),
+            "message::try_handle_pointer" => Some(Capability::WindowPointer),
+            "message::try_handle_buttons" => Some(Capability::WindowButtons),
+            "message::try_handle_image" => Some(Capability::WindowImages),
+            "message::try_handle_scene" => Some(Capability::AuxiliaryScene),
             "audio::try_handle" => Some(Capability::Audio),
             "timers::try_handle" => Some(Capability::Timers),
             "message_flags::try_handle" => Some(Capability::Flags),
@@ -150,11 +209,6 @@ fn inventory_matches_stateless_and_default_host_recognition_exhaustively() {
     audit("gesture::try_handle_drag_press", |vm| {
         PointerGesture::default()
             .try_handle_drag_press(vm, &ActionInput::default(), 0)
-            .unwrap_or(true)
-    });
-    audit("engine_flags::try_handle", |vm| {
-        cmvs_rs::engine_flags::EngineFlags::default()
-            .try_handle(vm)
             .unwrap_or(true)
     });
     audit("input::try_handle", |vm| {
@@ -357,6 +411,83 @@ fn inventory_matches_wait_and_resource_host_recognition_exhaustively() {
                 save_info: Some(&mut cmvs_rs::snapshot::SaveInfo::default()),
                 effects: Some(&mut true),
                 effect_objects: true,
+                messages: Some(&mut MessageHost::default()),
+                window_images: Some(&mut Unavailable),
+                buttons: Some(&mut cmvs_rs::buttons::ButtonHost::default()),
+                input: Some(cmvs_rs::dispatch::InputHosts {
+                    input: &mut ActionInput::default(),
+                    skip: false,
+                    clock: Some(0),
+                }),
+                list_input: true,
+                scene: Some(&mut SceneHost::default()),
+                camera: Some(&mut CameraHost::default()),
+                images: Some(cmvs_rs::dispatch::ImageHosts {
+                    scene: &mut SceneHost::default(),
+                    source: &mut Unavailable,
+                    change_images: true,
+                }),
+                runtime: true,
+                snapshot: Some(cmvs_rs::dispatch::SnapshotHosts {
+                    image: &mut cmvs_rs::snapshot::SaveImage::default(),
+                    capture: false,
+                    continue_without_image: true,
+                }),
+                message_wait: Some(cmvs_rs::dispatch::MessageWaitHosts {
+                    messages: &mut MessageHost::default(),
+                    input: &mut ActionInput::default(),
+                    flags: Default::default(),
+                    context: cmvs_rs::message::AutoAdvanceContext {
+                        settings: Default::default(),
+                        delta_ms: 0,
+                        gesture_result: false,
+                        read_eligible: true,
+                        audio: &RecordingAudio::default(),
+                    },
+                }),
+                scripts: Some(cmvs_rs::dispatch::ScriptHosts {
+                    host: &mut cmvs_rs::script_control::ScriptControl::new(0),
+                    source: &mut Unavailable,
+                }),
+                system_read: Some(cmvs_rs::dispatch::SystemReadHosts {
+                    host: &mut cmvs_rs::system_save::SystemSaveHost::default(),
+                    source: &mut Unavailable,
+                    game_id: None,
+                }),
+                system_write: Some(cmvs_rs::dispatch::SystemWriteHosts {
+                    host: &mut cmvs_rs::system_save::SystemSaveHost::default(),
+                    sink: &mut Unavailable,
+                    random: &mut cmvs_rs::random::CrtRandom::new(0),
+                    game_id: None,
+                }),
+                save_source: Some(&mut Unavailable),
+                bootstrap: Some(&mut cmvs_rs::bootstrap::Bootstrap::default()),
+                function_keys: Some(cmvs_rs::dispatch::FunctionKeys::Startup(
+                    &mut cmvs_rs::bootstrap::Bootstrap::default(),
+                )),
+                platform: Some(cmvs_rs::dispatch::PlatformHosts {
+                    host: &mut cmvs_rs::platform::PlatformHost::default(),
+                    backend: &mut cmvs_rs::platform::RecordingBackend::default(),
+                    assets: &mut Unavailable,
+                    cursors: &[],
+                }),
+                device_frame: Some(&mut cmvs_rs::platform::RecordingBackend::default()),
+                capture: Some(&mut cmvs_rs::capture::ScreenCapture::default()),
+                movies: Some(&mut cmvs_rs::movie::MovieHost::default()),
+                movie_scene: Some(cmvs_rs::dispatch::MovieSceneHosts {
+                    scene: &mut cmvs_rs::scene::SceneHost::default(),
+                    source: &mut Unavailable,
+                }),
+                movie_player: Some(cmvs_rs::dispatch::MoviePlayerHosts {
+                    source: &mut Unavailable,
+                    settings: Default::default(),
+                    backend: &mut cmvs_rs::audio::RecordingAudio::default(),
+                }),
+                scene_movie_playback: true,
+                sequence: Some(cmvs_rs::dispatch::SequenceHosts {
+                    host: &mut cmvs_rs::sequence::SequenceHost::default(),
+                    execution: None,
+                }),
                 audio: Some(cmvs_rs::dispatch::AudioHosts {
                     audio: &mut cmvs_rs::audio::AudioHost::default(),
                     backend: &mut RecordingAudio::default(),
@@ -466,43 +597,20 @@ fn all_overlaps_are_explicit_and_chain_orders_are_unique() {
         let overlaps: Vec<_> = (0..0x400)
             .filter(|&command| ownership::candidates(command, chain).len() > 1)
             .collect();
-        assert_eq!(
-            overlaps,
-            if chain == Chain::Runner {
-                vec![0x10b, 0x154, 0x159, 0x2b2, 0x34d, 0x383, 0x38b]
-            } else {
-                vec![0x34d]
-            }
-        );
+        assert_eq!(overlaps, Vec::<u16>::new());
     }
     assert!(
         CLAIMS
             .iter()
             .all(|claim| !claim.recognizes(0x400) && !claim.recognizes(u16::MAX))
     );
-    for (command, expected) in [
-        (0x10b, ["dispatch::ROOT", "message::try_handle"]),
-        (0x154, ["dispatch::ROOT", "message::try_handle"]),
-        (0x159, ["dispatch::ROOT", "message::try_record_poll"]),
-        (
-            0x2b2,
-            [
-                "runner::capture_snapshot",
-                "snapshot::SaveImage::try_handle",
-            ],
-        ),
-        (0x34d, ["bootstrap::try_handle", "input::try_handle"]),
-        (0x383, ["message::try_handle_scene", "message::try_handle"]),
-        (0x38b, ["dispatch::ROOT", "message::try_handle"]),
-    ] {
-        assert_eq!(
-            ownership::candidates(command, Chain::Runner)
-                .iter()
-                .map(|c| c.handler)
-                .collect::<Vec<_>>(),
-            expected
-        );
-    }
+    assert_eq!(
+        ownership::candidates(0x2b2, Chain::Runner)
+            .iter()
+            .map(|c| c.handler)
+            .collect::<Vec<_>>(),
+        ["dispatch::ROOT"]
+    );
 }
 
 #[test]
@@ -539,32 +647,22 @@ fn inventory_tracks_chain_entry_calls() {
                 *expected.entry(name.to_string()).or_default() += 1;
             }
         }
-        if chain == Chain::Trace {
-            // The sequence entry has a capability-dependent legacy fallback.
-            *expected.entry("try_handle".to_string()).or_default() += 1;
-        }
         assert_eq!(actual, expected, "{chain:?} entry inventory drifted");
     }
 }
 
 #[test]
-fn known_priority_difference_is_visible_without_changing_behavior() {
+fn function_key_public_apis_preserve_both_explicit_policy_effects() {
     let names = |chain| {
         ownership::candidates(0x34d, chain)
             .iter()
             .map(|c| c.handler)
             .collect::<Vec<_>>()
     };
-    assert_eq!(
-        names(Chain::Runner),
-        ["bootstrap::try_handle", "input::try_handle"]
-    );
-    assert_eq!(
-        names(Chain::Trace),
-        ["input::try_handle", "bootstrap::try_handle"]
-    );
-    // Both recognize the opcode, but their effects differ. This is a dispatch
-    // migration decision, not a conflict the inventory can silently resolve.
+    assert_eq!(names(Chain::Runner), ["dispatch::ROOT"]);
+    assert_eq!(names(Chain::Trace), ["dispatch::ROOT"]);
+    // Compatibility APIs retain both effects. ROOT chooses through an explicit
+    // Startup/Input context, covered separately by the environment batch tests.
     let mut code = vec![];
     command(&mut code, 0x234d, &[]);
     let script = script(&code);

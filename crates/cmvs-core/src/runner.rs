@@ -12,7 +12,7 @@ use crate::{
     gesture::PointerGesture,
     history::HistoryHost,
     image::ImageArchives,
-    input::{self, ActionInput},
+    input::ActionInput,
     machine::{Machine, Step},
     message::MessageHost,
     message_flags::MessageFlags,
@@ -142,7 +142,6 @@ pub struct Startup<'a> {
     save_info: SaveInfo,
     gesture: PointerGesture,
     message_flags: MessageFlags,
-    engine_flags: crate::engine_flags::EngineFlags,
     settings: crate::settings::SettingsHost,
     configuration: crate::settings::Configuration,
     messages: MessageHost,
@@ -249,7 +248,6 @@ impl<'a> Startup<'a> {
             save_info: SaveInfo::default(),
             gesture: PointerGesture::default(),
             message_flags,
-            engine_flags: Default::default(),
             settings,
             messages: MessageHost::default(),
             history: HistoryHost::default(),
@@ -615,26 +613,41 @@ impl<'a> Startup<'a> {
         }
         Ok(event)
     }
-    /// 0x213d / 0x140081520: the modal font dialog starts from the global face (+3160).
-    /// On OK the choice becomes global (0x140007f20) and the twelve text objects that
-    /// request the default face reselect it (0x14005ab40). Returns 0x4000 either way.
-    fn choose_font(&mut self, backend: &mut impl PlatformBackend) -> Result<(), Box<dyn Error>> {
-        let (pc, _) = self.machine.pending_system().expect("checked by caller");
-        let chosen = backend.choose_font(self.settings.font_face())?;
-        let mut settings = self.settings.clone();
-        if let Some(face) = &chosen {
-            settings
-                .set_font_face(face)
-                .map_err(|why| crate::evaluate::error(pc, 0x213d, why))?;
+    fn handle_runtime(
+        &mut self,
+        request: crate::dispatch::RuntimeCall,
+        backend: &mut impl PlatformBackend,
+    ) -> Result<StartupEvent, Box<dyn Error>> {
+        use crate::dispatch::RuntimeOperation::*;
+        request.validate(&self.machine)?;
+        match request.operation() {
+            Quit | Reset => return self.handle_lifecycle(&request),
+            CaptureSnapshot => {
+                let pc = request.pc();
+                let mut vm = self
+                    .machine
+                    .capture_vm()
+                    .map_err(|why| crate::evaluate::error(pc, 0x22b2, why))?;
+                vm.pc = pc as u32 + 2;
+                vm.repeat_count = 0;
+                self.capture_snapshot(vm)?;
+                request.complete(&mut self.machine, 0x4000)?;
+                return Ok(StartupEvent::SnapshotCaptured);
+            }
+            LoadSlot { slot } => self.handle_load_slot(&request, slot, backend)?,
+            SaveSlot { slot } => self.handle_save_slot(&request, slot)?,
+            EditSlots { first, second } => self.handle_edit_slots(&request, first, second)?,
+            Thumbnail => self.handle_thumbnail(&request)?,
+            LatestSlot { start, count } => self.handle_latest_slot(&request, start, count)?,
+            SlotInfo {
+                slot,
+                object,
+                child,
+                label_slot,
+                text_slot,
+            } => self.handle_slot_info(&request, slot, object, child, label_slot, text_slot)?,
         }
-        self.machine
-            .complete_system(crate::vm::SystemResult(0x4000))?;
-        if chosen.is_some() {
-            self.settings = settings;
-            self.messages.set_default_face(self.settings.font_face());
-            self.messages.refresh_default_fonts();
-        }
-        Ok(())
+        Ok(StartupEvent::Progress)
     }
     fn step_once(
         &mut self,
@@ -672,24 +685,68 @@ impl<'a> Startup<'a> {
         if let Some(first) = resolved.first_unreviewed {
             self.notices.push(first);
         }
-        if let Some(event) = self.try_lifecycle()? {
-            return Ok(event);
-        }
-        if self
-            .capture
-            .try_immediate(&mut self.machine, &mut self.scene, backend)?
-        {
-            return Ok(StartupEvent::Progress);
+        if crate::dispatch::is_lifecycle(command) {
+            let flow = crate::dispatch::run(
+                resolved.semantics,
+                &mut self.machine,
+                &mut crate::dispatch::Hosts {
+                    runtime: true,
+                    ..Default::default()
+                },
+            )?;
+            return match flow {
+                Some(crate::dispatch::Flow::Runtime(request)) => {
+                    self.handle_runtime(request, backend)
+                }
+                _ => Ok(StartupEvent::Unhandled {
+                    pc,
+                    command: command + 0x2000,
+                }),
+            };
         }
         let id = self.bootstrap.settings().get(&0x201d).copied();
         if command == 0x129
             && let Some(output) = &mut self.system_output
-            && self
-                .system_host
-                .try_write(&mut self.machine, output, &mut self.random, id)?
         {
-            self.system_source = FileSystemSave::new(output.path());
-            return Ok(StartupEvent::Progress);
+            let flow = crate::dispatch::run(
+                resolved.semantics,
+                &mut self.machine,
+                &mut crate::dispatch::Hosts {
+                    system_write: Some(crate::dispatch::SystemWriteHosts {
+                        host: &mut self.system_host,
+                        sink: output,
+                        random: &mut self.random,
+                        game_id: id,
+                    }),
+                    ..Default::default()
+                },
+            )?;
+            if flow == Some(crate::dispatch::Flow::SystemWritten) {
+                self.system_source = FileSystemSave::new(output.path());
+                return Ok(StartupEvent::Progress);
+            }
+            return Ok(StartupEvent::Unhandled {
+                pc,
+                command: command + 0x2000,
+            });
+        }
+        if crate::dispatch::uses_bootstrap(command) {
+            let mut hosts = crate::dispatch::Hosts::default();
+            if command == 0x34d {
+                hosts.function_keys =
+                    Some(crate::dispatch::FunctionKeys::Startup(&mut self.bootstrap));
+            } else {
+                hosts.bootstrap = Some(&mut self.bootstrap);
+            }
+            let flow = crate::dispatch::run(resolved.semantics, &mut self.machine, &mut hosts)?;
+            return Ok(if flow == Some(crate::dispatch::Flow::Done) {
+                StartupEvent::Progress
+            } else {
+                StartupEvent::Unhandled {
+                    pc,
+                    command: command + 0x2000,
+                }
+            });
         }
         if matches!(command, 0xa0 | 0xa4 | 0xa6 | 0xb0 | 0xba | 0x2d6 | 0x2d7) {
             self.audio_backend.configure_paths(self.bootstrap.paths())?;
@@ -717,6 +774,13 @@ impl<'a> Startup<'a> {
             self.resume_run = flow.yields();
             return Ok(match flow {
                 crate::dispatch::Flow::Done => StartupEvent::Progress,
+                crate::dispatch::Flow::Runtime(_)
+                | crate::dispatch::Flow::Control(_)
+                | crate::dispatch::Flow::SystemSave(_)
+                | crate::dispatch::Flow::SystemWritten
+                | crate::dispatch::Flow::Platform(_) => {
+                    unreachable!("wait handler returned a platform event")
+                }
                 crate::dispatch::Flow::Yield | crate::dispatch::Flow::Wait => StartupEvent::Yield,
                 crate::dispatch::Flow::Unhandled | crate::dispatch::Flow::Unavailable => {
                     StartupEvent::Unhandled {
@@ -739,71 +803,39 @@ impl<'a> Startup<'a> {
         } else {
             (self.message_flags, true)
         };
-        if let Some(step) = self.messages.try_wait_with_auto(
-            &mut self.machine,
-            &mut self.input,
-            message_flags,
-            crate::message::AutoAdvanceContext {
-                settings: self.settings.auto_advance(),
-                delta_ms: self.timers.delta_ms(),
-                gesture_result: self
-                    .gesture
-                    .field(88)
-                    .is_some_and(|value| value as i32 >= 0),
-                read_eligible,
-                audio: self.audio_backend.as_ref(),
-            },
-        )? {
+        if crate::dispatch::is_message_wait(command) {
+            let flow = crate::dispatch::run(
+                resolved.semantics,
+                &mut self.machine,
+                &mut crate::dispatch::Hosts {
+                    message_wait: Some(crate::dispatch::MessageWaitHosts {
+                        messages: &mut self.messages,
+                        input: &mut self.input,
+                        flags: message_flags,
+                        context: crate::message::AutoAdvanceContext {
+                            settings: self.settings.auto_advance(),
+                            delta_ms: self.timers.delta_ms(),
+                            gesture_result: self
+                                .gesture
+                                .field(88)
+                                .is_some_and(|value| value as i32 >= 0),
+                            read_eligible,
+                            audio: self.audio_backend.as_ref(),
+                        },
+                    }),
+                    ..Default::default()
+                },
+            )?
+            .expect("registered message wait");
             self.message_flags = message_flags;
-            self.resume_run = step == Step::Yield;
-            return Ok(if step == Step::Yield {
-                StartupEvent::Yield
-            } else {
-                StartupEvent::Progress
-            });
-        }
-        if let Some(flow) = crate::dispatch::run(
-            resolved.semantics,
-            &mut self.machine,
-            &mut crate::dispatch::Hosts {
-                audio: Some(crate::dispatch::AudioHosts {
-                    audio: &mut self.audio,
-                    backend: self.audio_backend.as_mut(),
-                }),
-                waits: None,
-                text: Some(crate::dispatch::TextHosts {
-                    messages: &mut self.messages,
-                    input: &mut self.input,
-                    flags: message_flags,
-                }),
-                timers: Some(&mut self.timers),
-                flags: Some(&mut self.message_flags),
-                random: Some(&mut self.random),
-                settings: Some(&mut self.settings),
-                history: Some(&mut self.history),
-                strings: true,
-                math: true,
-                gesture: Some(&mut self.gesture),
-                popup: Some(&mut self.save_menu),
-                save_title: Some(&mut self.save_title),
-                save_info: Some(&mut self.save_info),
-                effects: Some(&mut self.effects),
-                effect_objects: true,
-            },
-        )? {
+            self.resume_run = flow.yields();
             return Ok(match flow {
                 crate::dispatch::Flow::Done => StartupEvent::Progress,
-                crate::dispatch::Flow::Yield | crate::dispatch::Flow::Wait => {
-                    self.message_flags = message_flags;
-                    self.resume_run = true;
-                    StartupEvent::Yield
-                }
-                crate::dispatch::Flow::Unhandled | crate::dispatch::Flow::Unavailable => {
-                    StartupEvent::Unhandled {
-                        pc,
-                        command: command + 0x2000,
-                    }
-                }
+                crate::dispatch::Flow::Wait | crate::dispatch::Flow::Yield => StartupEvent::Yield,
+                _ => StartupEvent::Unhandled {
+                    pc,
+                    command: command + 0x2000,
+                },
             });
         }
         if command == 0x128
@@ -816,192 +848,219 @@ impl<'a> Startup<'a> {
             )
             .into());
         }
-        if let Some(event) =
-            self.system_host
-                .try_handle(&mut self.machine, &mut self.system_source, id)?
-        {
-            if !self.auto_resume_checked {
-                if let Some((_, integer)) = self.skip_auto_resume
-                    && event == SystemSaveEvent::Applied
-                {
-                    self.machine.state_mut().set_integer(integer, 0)?;
-                    self.auto_resume_skipped = true;
-                }
-                self.auto_resume_checked = true;
+        let mut image_source = self.images.with_paths(self.bootstrap.paths());
+        let input_clock = self.timers.clock();
+        let movie_settings = self.audio.settings();
+        let mut movie_source = DirectoryMovies {
+            root: &self.root,
+            directory: self.bootstrap.paths().get(&(0x2015, 0)).map(Vec::as_slice),
+            patch: self.patch.as_deref().and_then(|p| p.movie_directory()),
+        };
+        let mut scene_movie_source = self
+            .scene_movies
+            .with_paths(self.bootstrap.paths(), ResourceKind::SceneMovie);
+        let is_movie_player = crate::dispatch::uses_movie_player(command);
+        let mut hosts = crate::dispatch::Hosts {
+            runtime: true,
+            message_wait: None,
+            snapshot: Some(crate::dispatch::SnapshotHosts {
+                image: &mut self.save_image,
+                capture: self.snapshot_policy == SnapshotPolicy::Capture,
+                continue_without_image: self.snapshot_policy
+                    == SnapshotPolicy::ContinueWithoutImage,
+            }),
+            scripts: Some(crate::dispatch::ScriptHosts {
+                host: &mut self.control,
+                source: &mut self.source,
+            }),
+            system_read: Some(crate::dispatch::SystemReadHosts {
+                host: &mut self.system_host,
+                source: &mut self.system_source,
+                game_id: id,
+            }),
+            system_write: None,
+            save_source: Some(&mut self.saves),
+            bootstrap: None,
+            function_keys: None,
+            platform: None,
+            device_frame: None,
+            capture: Some(&mut self.capture),
+            sequence: None,
+            movies: Some(&mut self.movies),
+            movie_scene: None,
+            movie_player: None,
+            scene_movie_playback: true,
+            audio: None,
+            scene: None,
+            camera: None,
+            images: None,
+            waits: None,
+            text: None,
+            messages: None,
+            window_images: None,
+            input: None,
+            buttons: Some(&mut self.buttons),
+            list_input: true,
+            timers: Some(&mut self.timers),
+            flags: Some(&mut self.message_flags),
+            random: Some(&mut self.random),
+            settings: Some(&mut self.settings),
+            history: Some(&mut self.history),
+            strings: true,
+            math: true,
+            gesture: Some(&mut self.gesture),
+            popup: Some(&mut self.save_menu),
+            save_title: Some(&mut self.save_title),
+            save_info: Some(&mut self.save_info),
+            effects: Some(&mut self.effects),
+            effect_objects: true,
+        };
+        if crate::dispatch::uses_message_state(command) {
+            hosts.messages = Some(&mut self.messages);
+            if crate::dispatch::uses_input(command) {
+                hosts.input = Some(crate::dispatch::InputHosts {
+                    input: &mut self.input,
+                    skip: message_flags.skip(),
+                    clock: Some(input_clock),
+                });
             }
-            return Ok(StartupEvent::Progress);
-        }
-        if matches!(self.machine.pending_system(), Some((_, 0x13d))) {
-            self.choose_font(backend)?;
-            return Ok(StartupEvent::Progress);
-        }
-        if let Some(event) = self.platform.try_handle(
-            &mut self.machine,
-            backend,
-            &mut self.assets,
-            self.bootstrap.cursor_names(),
-        )? {
-            let yields = event == crate::platform::PlatformEvent::Yield;
-            self.resume_run = yields;
-            return Ok(if yields {
-                StartupEvent::Yield
-            } else {
-                StartupEvent::Progress
+        } else if crate::dispatch::uses_input(command) {
+            hosts.input = Some(crate::dispatch::InputHosts {
+                input: &mut self.input,
+                skip: message_flags.skip(),
+                clock: Some(input_clock),
+            });
+        } else {
+            hosts.text = Some(crate::dispatch::TextHosts {
+                messages: &mut self.messages,
+                input: &mut self.input,
+                flags: message_flags,
             });
         }
-        if let Some(event) = self
-            .control
-            .try_handle(&mut self.machine, &mut self.source)?
+        if crate::dispatch::uses_platform(command) {
+            hosts.platform = Some(crate::dispatch::PlatformHosts {
+                host: &mut self.platform,
+                backend,
+                assets: &mut self.assets,
+                cursors: self.bootstrap.cursor_names(),
+            });
+        } else if crate::dispatch::uses_device_frame(command) {
+            hosts.device_frame = Some(backend);
+        }
+        if is_movie_player {
+            hosts.movie_player = Some(crate::dispatch::MoviePlayerHosts {
+                source: &mut movie_source,
+                settings: movie_settings,
+                backend: self.audio_backend.as_mut(),
+            });
+        } else {
+            hosts.audio = Some(crate::dispatch::AudioHosts {
+                audio: &mut self.audio,
+                backend: self.audio_backend.as_mut(),
+            });
+        }
+        if crate::dispatch::uses_sequence(command) {
+            hosts.sequence = Some(crate::dispatch::SequenceHosts {
+                host: &mut self.sequence,
+                execution: Some(crate::sequence::SequenceContext {
+                    scene: &mut self.scene,
+                    images: &mut image_source,
+                    camera: Some(&mut self.camera),
+                }),
+            });
+        } else {
+            hosts.camera = Some(&mut self.camera);
+            if crate::dispatch::uses_movie_scene(command) {
+                hosts.movie_scene = Some(crate::dispatch::MovieSceneHosts {
+                    scene: &mut self.scene,
+                    source: &mut scene_movie_source,
+                });
+            } else if crate::dispatch::uses_window_images(command) {
+                hosts.window_images = Some(&mut image_source);
+            } else if crate::dispatch::uses_images(command) {
+                hosts.images = Some(crate::dispatch::ImageHosts {
+                    scene: &mut self.scene,
+                    source: &mut image_source,
+                    change_images: true,
+                });
+            } else {
+                hosts.scene = Some(&mut self.scene);
+            }
+        }
+        if let Some(flow) = crate::dispatch::run(resolved.semantics, &mut self.machine, &mut hosts)?
         {
-            if event == ControlEvent::MainPreparedNeedsSnapshot {
-                match self.snapshot_policy {
-                    SnapshotPolicy::Barrier => {
-                        self.main_barrier = true;
-                        return Ok(StartupEvent::MainPreparedNeedsSnapshot);
+            if let crate::dispatch::Flow::Runtime(request) = flow {
+                return self.handle_runtime(request, backend);
+            }
+            if let crate::dispatch::Flow::SystemSave(event) = flow {
+                if !self.auto_resume_checked {
+                    if let Some((_, integer)) = self.skip_auto_resume
+                        && event == SystemSaveEvent::Applied
+                    {
+                        self.machine.state_mut().set_integer(integer, 0)?;
+                        self.auto_resume_skipped = true;
                     }
-                    SnapshotPolicy::ContinueWithoutImage => {
-                        self.save_image.capture_unavailable(&mut self.machine)?;
-                        return Ok(StartupEvent::MainEnteredWithoutSnapshot);
-                    }
-                    SnapshotPolicy::Capture => {
-                        // Main is already loaded; a failed capture keeps the barrier sticky
-                        // instead of running main without an image.
-                        let captured = match self.machine.capture_vm() {
-                            Ok(vm) => self.capture_snapshot(vm),
-                            Err(why) => Err(why.into()),
-                        };
-                        if let Err(why) = captured {
+                    self.auto_resume_checked = true;
+                }
+                return Ok(StartupEvent::Progress);
+            }
+            if let crate::dispatch::Flow::Control(event) = flow {
+                if event == ControlEvent::MainPreparedNeedsSnapshot {
+                    match self.snapshot_policy {
+                        SnapshotPolicy::Barrier => {
                             self.main_barrier = true;
-                            return Err(why);
+                            return Ok(StartupEvent::MainPreparedNeedsSnapshot);
                         }
-                        return Ok(StartupEvent::SnapshotCaptured);
+                        SnapshotPolicy::ContinueWithoutImage => {
+                            self.save_image.capture_unavailable(&mut self.machine)?;
+                            return Ok(StartupEvent::MainEnteredWithoutSnapshot);
+                        }
+                        SnapshotPolicy::Capture => {
+                            // Main is already loaded; a failed capture keeps the barrier sticky
+                            // instead of running main without an image.
+                            let captured = match self.machine.capture_vm() {
+                                Ok(vm) => self.capture_snapshot(vm),
+                                Err(why) => Err(why.into()),
+                            };
+                            if let Err(why) = captured {
+                                self.main_barrier = true;
+                                return Err(why);
+                            }
+                            return Ok(StartupEvent::SnapshotCaptured);
+                        }
                     }
                 }
+                return Ok(StartupEvent::Progress);
             }
-            return Ok(StartupEvent::Progress);
-        }
-        if self.snapshot_policy == SnapshotPolicy::Capture
-            && let Some((pc, 0x2b2)) = self.machine.pending_system()
-        {
-            // 0x14007c9a0 serializes with PC + 2 and repeat 0, which completing the
-            // no-argument command then produces; a failed capture keeps it pending.
-            let mut vm = self
-                .machine
-                .capture_vm()
-                .map_err(|why| crate::evaluate::error(pc, 0x22b2, why))?;
-            vm.pc = pc as u32 + 2;
-            vm.repeat_count = 0;
-            self.capture_snapshot(vm)?;
-            self.machine
-                .complete_system(crate::vm::SystemResult(0x4000))?;
-            return Ok(StartupEvent::SnapshotCaptured);
-        }
-        if self.try_load_slot(backend)? {
-            return Ok(StartupEvent::Progress);
-        }
-        if self.try_edit_slots()?
-            || self.try_save_slot()?
-            || self.try_thumbnail()?
-            || self.try_latest_slot()?
-            || self.try_slot_info()?
-        {
-            return Ok(StartupEvent::Progress);
-        }
-        if self
-            .save_menu
-            .try_handle(&mut self.machine, &mut self.saves)?
-            || self.save_image.try_handle(
-                &mut self.machine,
-                self.snapshot_policy == SnapshotPolicy::ContinueWithoutImage,
-            )?
-            || self.bootstrap.try_handle(&mut self.machine)?.is_some()
-            || self.scene.try_handle(&mut self.machine)?
-            || self.scene.try_handle_quake(&mut self.machine)?
-            || self.scene.try_handle_strip(&mut self.machine)?
-            || self.scene.try_handle_image(
-                &mut self.machine,
-                &mut self.images.with_paths(self.bootstrap.paths()),
-            )?
-            || self.scene.try_change_image(
-                &mut self.machine,
-                &mut self.images.with_paths(self.bootstrap.paths()),
-            )?
-            || self.scene.try_handle_mask(
-                &mut self.machine,
-                &mut self.images.with_paths(self.bootstrap.paths()),
-            )?
-            || self.gesture.try_handle_drag_press(
-                &mut self.machine,
-                &self.input,
-                self.timers.clock(),
-            )?
-            || self.engine_flags.try_handle(&mut self.machine)?
-            || self
-                .messages
-                .try_record_poll(&mut self.machine, self.message_flags)?
-            || self
-                .messages
-                .try_handle_scene(&mut self.machine, &mut self.scene)?
-            || self.messages.try_handle(&mut self.machine)?
-            || self
-                .messages
-                .try_handle_pointer(&mut self.machine, &self.input)?
-            || self
-                .messages
-                .try_handle_buttons(&mut self.machine, &mut self.input)?
-            || self.messages.try_handle_image(
-                &mut self.machine,
-                &mut self.images.with_paths(self.bootstrap.paths()),
-            )?
-            || self
-                .buttons
-                .try_handle(&mut self.machine, &mut self.scene)?
-            || self.buttons.try_handle_list_input(
-                &mut self.machine,
-                &mut self.scene,
-                &mut self.input,
-                &self.gesture,
-            )?
-            || self
-                .buttons
-                .try_handle_input(&mut self.machine, &mut self.scene, &mut self.input)?
-            || self.movies.try_create_scene(
-                &mut self.machine,
-                &mut self.scene,
-                &mut self
-                    .scene_movies
-                    .with_paths(self.bootstrap.paths(), ResourceKind::SceneMovie),
-            )?
-            || self.movies.try_start_scene(&mut self.machine)?
-            || self.movies.try_handle(&mut self.machine)?
-            || self.movies.try_handle_player(
-                &mut self.machine,
-                &mut DirectoryMovies {
-                    root: &self.root,
-                    directory: self.bootstrap.paths().get(&(0x2015, 0)).map(Vec::as_slice),
-                    patch: self.patch.as_deref().and_then(|p| p.movie_directory()),
-                },
-                self.audio.settings(),
-                self.audio_backend.as_mut(),
-            )?
-            || input::try_handle(&mut self.machine, &mut self.input)?
-            || input::try_handle_skipping(
-                &mut self.machine,
-                &self.input,
-                self.message_flags.skip(),
-            )?
-            || self.sequence.try_handle_with_hosts(
-                &mut self.machine,
-                &mut self.scene,
-                &mut self.images.with_paths(self.bootstrap.paths()),
-                &mut self.camera,
-            )?
-            || self.camera.try_handle(&mut self.machine)?
-            || self
-                .capture
-                .try_handle(&mut self.machine, &mut self.scene)?
-        {
-            return Ok(StartupEvent::Progress);
+            return Ok(match flow {
+                crate::dispatch::Flow::Runtime(_)
+                | crate::dispatch::Flow::Control(_)
+                | crate::dispatch::Flow::SystemSave(_)
+                | crate::dispatch::Flow::SystemWritten => {
+                    unreachable!("storage event handled before ordinary flow")
+                }
+                crate::dispatch::Flow::Done => StartupEvent::Progress,
+                crate::dispatch::Flow::Platform(event) => {
+                    let yields = event == crate::platform::PlatformEvent::Yield;
+                    self.resume_run = yields;
+                    if yields {
+                        StartupEvent::Yield
+                    } else {
+                        StartupEvent::Progress
+                    }
+                }
+                crate::dispatch::Flow::Yield | crate::dispatch::Flow::Wait => {
+                    self.message_flags = message_flags;
+                    self.resume_run = true;
+                    StartupEvent::Yield
+                }
+                crate::dispatch::Flow::Unhandled | crate::dispatch::Flow::Unavailable => {
+                    StartupEvent::Unhandled {
+                        pc,
+                        command: command + 0x2000,
+                    }
+                }
+            });
         }
         Ok(StartupEvent::Unhandled {
             pc,

@@ -396,6 +396,10 @@ pub struct AudioHost {
     /// zeroes it, and stopping keeps it. Only the snapshot reads it here.
     played: [u32; SE_CHANNELS],
     bgm: BgmState,
+    /// Mikage, 2017 builds: sound device +0xaec (constructor 0x14008e290 sets 1;
+    /// 2017-11-29 cmvs64.exe). While it and +0xae8 are clear, the mixer forces the
+    /// volumes down when the window is inactive. Set by 0x22ed.
+    background_sound: bool,
 }
 
 impl Default for AudioHost {
@@ -444,7 +448,12 @@ impl AudioHost {
             mixer: VoiceMixer::default(),
             played: [0; SE_CHANNELS],
             bgm: BgmState::default(),
+            background_sound: true,
         }
+    }
+    /// Whether the game keeps its sound while the window is inactive (0x22ed).
+    pub fn background_sound(&self) -> bool {
+        self.background_sound
     }
     pub fn bgm(&self) -> &BgmState {
         &self.bgm
@@ -491,7 +500,7 @@ impl AudioHost {
         let Some((pc, command)) = vm.pending_system() else {
             return Ok(false);
         };
-        if !matches!(command, 0xa0..=0xa2 | 0xa4 | 0xa6 | 0xa8..=0xaa | 0xaf..=0xb1 | 0xb3 | 0xb5..=0xb7 | 0xba | 0x238..=0x23f | 0x241 | 0x2d6..=0x2dd)
+        if !matches!(command, 0xa0..=0xa2 | 0xa4 | 0xa6 | 0xa8..=0xaa | 0xaf..=0xb1 | 0xb3 | 0xb5..=0xb7 | 0xba | 0x238..=0x23f | 0x241 | 0x2d6..=0x2dd | 0x2ed)
         {
             return Ok(false);
         }
@@ -536,6 +545,22 @@ impl AudioHost {
                 return Ok(());
             }
             0x2d6..=0x2dd => return self.try_settings_query(call, backend),
+            0x2ed => {
+                // Mikage, 2017 builds: 0x22ed (0x1400834c0, pops 8). A zero SP-4
+                // copies +0xaec to system result 0, otherwise +0xaec = bool(SP-8).
+                let set = call.argument(4, "mode")? != 0;
+                let value = call.argument(8, "value")? != 0;
+                call.complete(0x4008)?;
+                if set {
+                    self.background_sound = value;
+                } else {
+                    call.vm
+                        .state_mut()
+                        .set_system_integer(0, u32::from(self.background_sound))
+                        .expect("slot 0 exists");
+                }
+                return Ok(());
+            }
             0xa8 => return self.try_voice_stop(call, backend),
             0xa9 => return self.try_voice_fade_out(call, backend),
             0xa6 | 0xaf => return self.try_voice_play(call, backend),

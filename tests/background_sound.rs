@@ -1,5 +1,5 @@
 use cmvs_rs::{
-    engine_flags::EngineFlags,
+    audio::{AudioBackend, AudioHost, AudioRequest},
     machine::{Machine, Step},
     ps3::Script,
 };
@@ -50,12 +50,19 @@ fn background_sound_defaults_on_and_answers_queries() {
     call(&mut code, 0x22ed, &[0, 0]);
     let script = script(&code);
     let mut vm = Machine::new(&script).unwrap();
-    let mut flags = EngineFlags::default();
+    let mut audio = AudioHost::default();
     for expected in [1, 1, 0] {
         pending(&mut vm);
         vm.state_mut().set_system_integer(0, 1).unwrap();
-        assert!(flags.try_handle(&mut vm).unwrap());
+        assert!(audio.try_handle(&mut vm, &mut Silent).unwrap());
         assert_eq!(vm.state().system_integer(0), Some(expected));
     }
-    assert!(!flags.background_sound);
+    assert!(!audio.background_sound());
+}
+
+struct Silent;
+impl AudioBackend for Silent {
+    fn play(&mut self, _: &AudioRequest) -> Result<bool, Box<dyn std::error::Error>> {
+        Ok(true)
+    }
 }
