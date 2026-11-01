@@ -20,7 +20,8 @@ The font code is upstream's `cmvs-desktop` `font.rs`/`font_library.rs`, compiled
 cargo test -p cmvs-mobile
 cargo check -p cmvs-mobile --target aarch64-apple-ios
 cargo build -p cmvs-mobile --release --target aarch64-apple-ios   # needs Xcode to link
-cargo run -p cmvs-mobile --bin cmvs-mobile-run -- <game> --font <font.ttc> --face "Hiragino Sans" --seconds 30 --shot out.png
+cargo run -p cmvs-mobile --bin cmvs-mobile-run -- <game> --font <font.ttc> --face "Hiragino Sans" --seconds 120 \
+    --click 20000:640,275 --tap-every 1500 --tap-at 1150,120 --shot out.png   # click 「はじめから」 on アマツツミ, then advance text
 ```
 
 ## Known limits
@@ -33,3 +34,7 @@ cargo run -p cmvs-mobile --bin cmvs-mobile-run -- <game> --font <font.ttc> --fac
 ## Syncing upstream
 
 Merge upstream `main` into `mikage`. The fork's changes outside `crates/cmvs-mobile` are small on purpose; conflicts should stay in `crates/cmvs-audio/src/lib.rs`, `Cargo.toml` and `system_save/profile.rs`.
+
+## Tested
+
+アマツツミ (Steam/DL v1.03 data, not recorded upstream, so the cmvs32.exe profile is used): title, quit dialog, load screen and the opening story (text, CG, menu bar, BGM/SE through the mixer) run headless with `cmvs-mobile-run`. Not yet run on a device.

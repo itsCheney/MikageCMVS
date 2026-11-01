@@ -22,10 +22,13 @@ extern "C" fn print_log(
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = std::env::args().skip(1);
     let usage = "usage: cmvs-mobile-run <game-dir> --font <file> [--face <name>] [--save-dir <dir>] \
-                 [--seconds <n>] [--tap-every <ms>] [--shot <out.png>]";
+                 [--seconds <n>] [--tap-every <ms>] [--tap-at <x>,<y>] [--click <ms>:<x>,<y>]... \
+                 [--shot <out.png>]";
     let game_dir = args.next().ok_or(usage)?;
     let (mut font, mut face, mut save_dir, mut shot) = (None, None, None, None);
     let (mut seconds, mut tap_every) = (20u32, 0u32);
+    let mut tap_at = (640.0f64, 600.0f64);
+    let mut clicks: Vec<(u32, (f64, f64))> = Vec::new();
     while let Some(flag) = args.next() {
         let value = args.next().ok_or(usage)?;
         match flag.as_str() {
@@ -34,6 +37,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--save-dir" => save_dir = Some(value),
             "--seconds" => seconds = value.parse()?,
             "--tap-every" => tap_every = value.parse()?,
+            "--tap-at" => tap_at = point(&value).ok_or(usage)?,
+            "--click" => {
+                let (ms, at) = value.split_once(':').ok_or(usage)?;
+                clicks.push((ms.parse()?, point(at).ok_or(usage)?));
+            }
             "--shot" => shot = Some(value),
             _ => return Err(usage.into()),
         }
@@ -53,8 +61,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut status = Status::Running;
     for frame in 0..seconds * 1000 / frame_ms {
         let now = frame * frame_ms;
+        let mut tap = None;
         if tap_every != 0 && now % tap_every < frame_ms {
-            session.pointer(640.0, 600.0);
+            tap = Some(tap_at);
+        }
+        if let Some(&(_, at)) = clicks
+            .iter()
+            .find(|(ms, _)| (now..now + frame_ms).contains(ms))
+        {
+            tap = Some(at);
+        }
+        if let Some((x, y)) = tap {
+            session.pointer(x, y);
             session.button(cmvs_mobile::input::BUTTON_LEFT, true);
             session.button(cmvs_mobile::input::BUTTON_LEFT, false);
         }
@@ -75,4 +93,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     session.close();
     Ok(())
+}
+
+/// Parses "x,y" in screen pixels.
+fn point(text: &str) -> Option<(f64, f64)> {
+    let (x, y) = text.split_once(',')?;
+    Some((x.trim().parse().ok()?, y.trim().parse().ok()?))
 }
