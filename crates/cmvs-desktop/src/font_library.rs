@@ -12,7 +12,9 @@ use std::{
     sync::Arc,
 };
 
-const MAX_FONT: usize = 32 * 1024 * 1024;
+// Mikage: 128 MB, for the TrueType faces the iOS app rebuilds from system
+// outlines (PingFang is over 32 MB).
+const MAX_FONT: usize = 128 * 1024 * 1024;
 const MAX_FONT_FILES: usize = 8192;
 
 pub struct FontLibrary {

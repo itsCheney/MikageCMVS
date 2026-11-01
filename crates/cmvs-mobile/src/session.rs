@@ -481,10 +481,14 @@ impl Session {
     }
 }
 
+/// Host fonts can be large: the PingFang the app rebuilds as TrueType from the
+/// system's outlines is over 32 MB, the limit the desktop font code uses.
+const MAX_FONT: usize = 128 * 1024 * 1024;
+
 fn font_renderer(fonts: &[FontFile]) -> Result<FontRenderer> {
-    let first = fonts
-        .first()
-        .ok_or("register a font before opening a game")?;
+    if fonts.is_empty() {
+        return Err("register a font before opening a game".into());
+    }
     let mut directories = Vec::new();
     for font in fonts {
         if let Some(dir) = font.path.parent()
@@ -493,17 +497,48 @@ fn font_renderer(fonts: &[FontFile]) -> Result<FontRenderer> {
             directories.push(dir.to_owned());
         }
     }
-    let index = face_index(first)?;
+    // The first registered font that loads is the default; a broken one is
+    // logged and skipped so a fallback font still lets the game start.
+    let mut errors: Vec<String> = Vec::new();
+    for font in fonts {
+        match load_font(font) {
+            Ok(default) => {
+                for error in &errors {
+                    log::emit(log::WARN, error);
+                }
+                return Ok(FontRenderer::with_library(FontLibrary::with_directories(
+                    Arc::new(default),
+                    directories,
+                )));
+            }
+            Err(e) => errors.push(e.to_string()),
+        }
+    }
+    Err(errors.join("; ").into())
+}
+
+fn load_font(font: &FontFile) -> Result<ab_glyph::FontVec> {
+    let index = face_index(font)?;
     let mut bytes = Vec::new();
-    std::fs::File::open(&first.path)?
-        .take(32 * 1024 * 1024 + 1)
+    std::fs::File::open(&font.path)?
+        .take(MAX_FONT as u64 + 1)
         .read_to_end(&mut bytes)?;
-    let default = ab_glyph::FontVec::try_from_vec_and_index(bytes, index)
-        .map_err(|_| format!("{} is not a usable font", first.path.display()))?;
-    Ok(FontRenderer::with_library(FontLibrary::with_directories(
-        Arc::new(default),
-        directories,
-    )))
+    if bytes.len() > MAX_FONT {
+        return Err(format!(
+            "{} is larger than {} MB",
+            font.path.display(),
+            MAX_FONT >> 20
+        )
+        .into());
+    }
+    let size = bytes.len();
+    ab_glyph::FontVec::try_from_vec_and_index(bytes, index).map_err(|e| {
+        format!(
+            "{} is not a usable font ({size} bytes, face {index}): {e}",
+            font.path.display()
+        )
+        .into()
+    })
 }
 
 /// The collection index of a face given by name (family names, any language), or

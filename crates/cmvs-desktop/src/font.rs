@@ -19,7 +19,9 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-const MAX_FONT: usize = 32 * 1024 * 1024;
+// Mikage: 128 MB, for the TrueType faces the iOS app rebuilds from system
+// outlines (PingFang is over 32 MB).
+const MAX_FONT: usize = 128 * 1024 * 1024;
 
 /// The explicit font file (TTC face selected explicitly) serves the built-in default
 /// face; faces named by glyphs are resolved through `FontLibrary`.
