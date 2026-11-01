@@ -1166,8 +1166,7 @@ fn text_layout_wraps_keeps_closing_marks_and_shifts_voiced_marks() {
 fn text_layout_errors_keep_the_group_pen_and_pending_command() {
     let thirty_three = b"\x82\xa0".repeat(33);
     for (layout, text) in [
-        (&[7, 100, 50, 110, 200][..], &b"\x82\xa0A"[..]), // uninitialized half-width advance
-        (&[7, 100, 50, 110, 200], b"\\x"),                // loops forever in the original
+        (&[7, 100, 50, 110, 200][..], &b"\\x"[..]), // loops forever in the original
         (&[7, 100, 50, 110, 200], b"\\"),
         (&[7, 100, 50, 110, 200], b"\\w"),
         (&[7, 100, 50, 110, 200], b"{\x8a\xbf/\x82\xa9"),
@@ -1195,6 +1194,34 @@ fn text_layout_errors_keep_the_group_pen_and_pending_command() {
         assert!(group.glyphs.is_empty());
         assert_eq!(group.word(176), pen);
     }
+}
+
+#[test]
+fn half_width_text_advances_half_a_cell_like_the_measurement() {
+    // あAB, then a wrap: area 100..210, size 24, spacing 2, so the edge is at 184.
+    let text = b"\x82\xa0AB\x82\xa2\x82\xa4\x82\xa6C".to_vec();
+    let mut calls = AREA.to_vec();
+    calls.push((0x238b, &[7, 1]));
+    let script = content_script(&calls, &text);
+    let mut vm = Machine::new(&script).unwrap();
+    let mut messages = MessageHost::default();
+    messages.set_record_output(true);
+    run_calls(&mut vm, &mut messages, 3);
+    run(&mut vm, &mut messages);
+    let group = messages.auxiliary_text(7).unwrap();
+    let placed: Vec<(u16, [i32; 2])> = group.glyphs.iter().map(|g| (g.code, g.position)).collect();
+    assert_eq!(
+        placed,
+        [
+            (0x82a0, [100, 50]),
+            (0x41, [126, 50]),
+            (0x42, [140, 50]),
+            (0x82a2, [154, 50]),
+            (0x82a4, [180, 50]),
+            (0x82a6, [100, 80]),
+            (0x43, [126, 80]),
+        ]
+    );
 }
 
 #[test]

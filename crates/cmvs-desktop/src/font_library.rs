@@ -71,9 +71,9 @@ impl FontLibrary {
             || matches!(self.locate(face), Ok(Some(_)))
     }
     fn locate(&mut self, face: &[u8]) -> Result<Option<(PathBuf, u32)>, FormatError> {
-        let (name, _, invalid) = encoding_rs::SHIFT_JIS.decode(face);
+        let (name, _, invalid) = crate::font::game_encoding().decode(face);
         if invalid {
-            return Err(FormatError("font face is not valid Shift-JIS"));
+            return Err(FormatError("font face is not valid in the game encoding"));
         }
         let key = name.to_lowercase();
         let index = match &self.index {

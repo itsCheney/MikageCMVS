@@ -315,6 +315,8 @@ dependencies = [
  "cmvs-native",
  "cmvs-wgpu",
  "encoding_rs",
+ "miniz_oxide 0.8.9",
+ "png",
  "pollster",
  "raw-window-handle",
  "rodio",

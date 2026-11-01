@@ -11,6 +11,7 @@ pub mod audio;
 mod backend;
 pub mod input;
 pub mod log;
+pub mod patch;
 pub mod select;
 pub mod session;
 
@@ -33,7 +34,7 @@ use std::{
 };
 
 /// `CMVS_ABI_VERSION`.
-pub const ABI_VERSION: u32 = 1;
+pub const ABI_VERSION: u32 = 2;
 
 /// `CmvsConfig`.
 #[repr(C)]
@@ -193,8 +194,9 @@ pub unsafe extern "C" fn cmvs_open(config: *const CmvsConfig) -> *mut CmvsSessio
             return std::ptr::null_mut();
         };
         let encoding = match config.encoding {
-            0 => Encoding::ShiftJis,
-            1 => Encoding::Gbk,
+            0 => Encoding::Automatic,
+            1 => Encoding::ShiftJis,
+            2 => Encoding::Gbk,
             other => {
                 set_error(format!("unknown encoding {other}"));
                 return std::ptr::null_mut();

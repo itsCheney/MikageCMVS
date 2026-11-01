@@ -31,3 +31,6 @@ rodio.workspace = true
 pollster.workspace = true
 raw-window-handle = "=0.6.2"
 rtrb = "=0.3.2"
+# Translation patches (src/patch.rs): DEFLATE archives holding PNG images.
+miniz_oxide = { version = "=0.8.9", features = ["with-alloc"] }
+png = "=0.17.16"

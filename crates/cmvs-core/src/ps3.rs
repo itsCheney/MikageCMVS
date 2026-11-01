@@ -140,6 +140,16 @@ impl Script {
     }
 
     pub fn decode(raw: &[u8]) -> Result<Self, FormatError> {
+        Self::decode_with(raw, true)
+    }
+
+    /// A script from a translation patch: patch tools often write the LZSS
+    /// payload without the byte obfuscation; the engine's hook reads either.
+    pub fn decode_patch(raw: &[u8]) -> Result<Self, FormatError> {
+        Self::decode_with(raw, false).or_else(|_| Self::decode_with(raw, true))
+    }
+
+    fn decode_with(raw: &[u8], obfuscated: bool) -> Result<Self, FormatError> {
         let header = Header::parse(raw)?;
         let total = header.segment_size();
         if total > MAX_PAYLOAD as u64 || u64::from(header.decoded_size) > MAX_PAYLOAD as u64 {
@@ -164,10 +174,14 @@ impl Script {
             .ok_or(FormatError("truncated script payload"))?;
         let xor = ((header.key >> 3).wrapping_add(header.key >> 24)) as u8;
         let shift = (header.key >> 20) % 5 + 1;
-        let transformed: Vec<u8> = input
-            .iter()
-            .map(|v| (v.wrapping_sub(124) ^ xor).rotate_right(shift))
-            .collect();
+        let transformed: Vec<u8> = if obfuscated {
+            input
+                .iter()
+                .map(|v| (v.wrapping_sub(124) ^ xor).rotate_right(shift))
+                .collect()
+        } else {
+            input.to_vec()
+        };
         let payload = if packed == 0 {
             transformed
         } else {

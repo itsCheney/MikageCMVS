@@ -22,13 +22,14 @@ extern "C" fn print_log(
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = std::env::args().skip(1);
     let usage = "usage: cmvs-mobile-run <game-dir> --font <file> [--face <name>] [--save-dir <dir>] \
-                 [--seconds <n>] [--tap-every <ms>] [--tap-at <x>,<y>] [--click <ms>:<x>,<y>]... \
+                 [--seconds <n>] [--tap-every <ms>] [--tap-at <x>,<y>] [--click <ms>:<x>,<y>]... [--wheel <ms>:<notches>]... \
                  [--shot <out.png>]";
     let game_dir = args.next().ok_or(usage)?;
     let (mut font, mut face, mut save_dir, mut shot) = (None, None, None, None);
     let (mut seconds, mut tap_every) = (20u32, 0u32);
     let mut tap_at = (640.0f64, 600.0f64);
     let mut clicks: Vec<(u32, (f64, f64))> = Vec::new();
+    let mut wheels: Vec<(u32, i32)> = Vec::new();
     while let Some(flag) = args.next() {
         let value = args.next().ok_or(usage)?;
         match flag.as_str() {
@@ -42,6 +43,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let (ms, at) = value.split_once(':').ok_or(usage)?;
                 clicks.push((ms.parse()?, point(at).ok_or(usage)?));
             }
+            "--wheel" => {
+                let (ms, notches) = value.split_once(':').ok_or(usage)?;
+                wheels.push((ms.parse()?, notches.parse()?));
+            }
             "--shot" => shot = Some(value),
             _ => return Err(usage.into()),
         }
@@ -50,7 +55,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut session = Session::open(Config {
         game_dir: game_dir.into(),
         save_dir: save_dir.map(Into::into),
-        encoding: Encoding::ShiftJis,
+        encoding: Encoding::Automatic,
         utc_offset_ms: 0,
         fonts: vec![FontFile {
             path: font.ok_or(usage)?.into(),
@@ -59,6 +64,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     })?;
     let frame_ms = 16;
     let mut status = Status::Running;
+    // Play the sound into nothing at the speed of the virtual clock: movies
+    // follow the soundtrack's position.
+    let mut sound = session.take_audio_source();
+    let mut sound_due = 0u64;
     for frame in 0..seconds * 1000 / frame_ms {
         let now = frame * frame_ms;
         let mut tap = None;
@@ -76,7 +85,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             session.button(cmvs_mobile::input::BUTTON_LEFT, true);
             session.button(cmvs_mobile::input::BUTTON_LEFT, false);
         }
+        for &(_, notches) in wheels
+            .iter()
+            .filter(|(ms, _)| (now..now + frame_ms).contains(ms))
+        {
+            session.wheel(notches);
+        }
         status = session.step(frame_ms);
+        if let Some(sound) = &mut sound {
+            let rate = u64::from(cmvs_mobile::audio::SAMPLE_RATE);
+            let target = u64::from(now + frame_ms) * rate / 1000 * 2;
+            while sound_due < target {
+                let _ = sound.next();
+                sound_due += 1;
+            }
+        }
         if status != Status::Running {
             break;
         }

@@ -164,6 +164,22 @@ pub trait ScriptSource {
     fn load(&mut self, name: &[u8]) -> Result<Script, LoadError>;
 }
 
+/// The script archive behind a translation patch's scripts.
+pub struct PatchedScripts<S> {
+    pub inner: S,
+    pub patch: Option<std::sync::Arc<dyn crate::patch::PatchFiles>>,
+}
+impl<S: ScriptSource> ScriptSource for PatchedScripts<S> {
+    fn load(&mut self, name: &[u8]) -> Result<Script, LoadError> {
+        if let Some(patch) = &self.patch
+            && let Some(raw) = patch.script(name)?
+        {
+            return Ok(Script::decode_patch(&raw)?);
+        }
+        self.inner.load(name)
+    }
+}
+
 pub struct ArchiveScripts<R> {
     reader: R,
     index: ArchiveIndex,

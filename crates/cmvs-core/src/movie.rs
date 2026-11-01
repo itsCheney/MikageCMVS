@@ -48,6 +48,8 @@ pub trait MovieSource {
 pub struct DirectoryMovies<'a> {
     pub root: &'a Path,
     pub directory: Option<&'a [u8]>,
+    /// A translation patch's movie directory, searched first.
+    pub patch: Option<&'a [u8]>,
 }
 
 impl MovieSource for DirectoryMovies<'_> {
@@ -63,25 +65,39 @@ impl MovieSource for DirectoryMovies<'_> {
         let directory = self
             .directory
             .ok_or("movie directory 0x2015 was not registered")?;
-        let mut relative = directory.to_vec();
-        relative.extend_from_slice(name);
-        let path = match resolve_under(self.root, &relative) {
-            Ok(path) => path,
-            Err(e)
-                if e.downcast_ref::<io::Error>()
-                    .is_some_and(|e| e.kind() == io::ErrorKind::NotFound) =>
-            {
-                return Ok(None);
-            }
-            Err(e) => return Err(e),
-        };
-        let mut file = match File::open(path) {
-            Ok(file) => file,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
-            Err(e) => return Err(e.into()),
-        };
-        Ok(Some((relative, CmvIndex::read(&mut file)?)))
+        if let Some(patch) = self.patch
+            && let Some(movie) = open_movie(self.root, patch, name)?
+        {
+            return Ok(Some(movie));
+        }
+        open_movie(self.root, directory, name)
     }
+}
+
+/// Opens `directory` + `name` below `root`; a missing file is Ok(None).
+fn open_movie(
+    root: &Path,
+    directory: &[u8],
+    name: &[u8],
+) -> Result<Option<OpenedMovie>, Box<dyn Error>> {
+    let mut relative = directory.to_vec();
+    relative.extend_from_slice(name);
+    let path = match resolve_under(root, &relative) {
+        Ok(path) => path,
+        Err(e)
+            if e.downcast_ref::<io::Error>()
+                .is_some_and(|e| e.kind() == io::ErrorKind::NotFound) =>
+        {
+            return Ok(None);
+        }
+        Err(e) => return Err(e),
+    };
+    let mut file = match File::open(path) {
+        Ok(file) => file,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e.into()),
+    };
+    Ok(Some((relative, CmvIndex::read(&mut file)?)))
 }
 
 /// The +4472 player while a movie runs.

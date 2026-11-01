@@ -116,7 +116,8 @@ pub struct Startup<'a> {
     notices: Vec<u16>,
     bootstrap: Bootstrap,
     control: ScriptControl,
-    source: ArchiveScripts<File>,
+    source: crate::script_control::PatchedScripts<ArchiveScripts<File>>,
+    patch: Option<std::sync::Arc<dyn crate::patch::PatchFiles>>,
     saves: DirectorySaves,
     save_menu: SaveMenuHost,
     system_source: FileSystemSave,
@@ -214,7 +215,11 @@ impl<'a> Startup<'a> {
             focused: true,
             bootstrap: Bootstrap::default(),
             control: ScriptControl::new(virtual_tick),
-            source: ArchiveScripts::new(File::open(root.join(&game.files.script_archive))?)?,
+            source: crate::script_control::PatchedScripts {
+                inner: ArchiveScripts::new(File::open(root.join(&game.files.script_archive))?)?,
+                patch: None,
+            },
+            patch: None,
             saves: DirectorySaves::new(root.join("save"))?,
             save_menu,
             system_source: FileSystemSave::new(root.join("save/system.dat")),
@@ -286,6 +291,13 @@ impl<'a> Startup<'a> {
         Ok(())
     }
     /// Research only: let unreviewed commands run with the base profile's semantics.
+    /// Serve scripts, images and movies of a translation patch before the
+    /// game's own (what a patch's hooking DLL does). Set before the first tick.
+    pub fn set_patch(&mut self, patch: Option<std::sync::Arc<dyn crate::patch::PatchFiles>>) {
+        self.source.patch = patch.clone();
+        self.images.set_patch(patch.clone());
+        self.patch = patch;
+    }
     pub fn set_allow_unreviewed(&mut self, allow: bool) {
         self.gate.set_allow_unreviewed(allow);
     }
@@ -350,6 +362,7 @@ impl<'a> Startup<'a> {
             &mut DirectoryMovies {
                 root: &self.root,
                 directory: self.bootstrap.paths().get(&(0x2015, 0)).map(Vec::as_slice),
+                patch: self.patch.as_deref().and_then(|p| p.movie_directory()),
             },
         )?;
         if had_movie && self.movies.player().is_none() && clock.is_some() {
@@ -949,6 +962,7 @@ impl<'a> Startup<'a> {
                 &mut DirectoryMovies {
                     root: &self.root,
                     directory: self.bootstrap.paths().get(&(0x2015, 0)).map(Vec::as_slice),
+                    patch: self.patch.as_deref().and_then(|p| p.movie_directory()),
                 },
                 self.audio.settings(),
                 self.audio_backend.as_mut(),

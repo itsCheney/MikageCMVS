@@ -7,11 +7,15 @@ use crate::{
     font_library::{FontLibrary, family_names},
     input::{MobileInput, SCREEN},
     log,
+    patch::PkPatch,
     select::{self, Basis},
 };
 use cmvs_core::{
+    encoding::TextEncoding,
     input::KeyBindings,
     message::MESSAGE_WINDOWS,
+    patch::PatchFiles,
+    ps3::Script,
     raster::RgbaImage,
     runner::{SaveTime, Startup, StartupEvent, load_start},
     scene_render::prepare_scene,
@@ -35,6 +39,8 @@ const STEP_BUDGET: Duration = Duration::from_millis(12);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Encoding {
+    /// GBK when the game has a Chinese patch in `Pk/`, else Shift-JIS.
+    Automatic,
     ShiftJis,
     Gbk,
 }
@@ -79,6 +85,7 @@ pub struct Session {
     // Fields drop in order: the engine (and its audio channels) before the GPU.
     startup: Startup<'static>,
     root: PathBuf,
+    encoding: TextEncoding,
     bindings: KeyBindings,
     input: MobileInput,
     display: DisplayState,
@@ -97,8 +104,23 @@ pub struct Session {
 impl Session {
     pub fn open(config: Config) -> Result<Self> {
         let root = config.game_dir.canonicalize()?;
-        if config.encoding != Encoding::ShiftJis {
-            return Err("only Shift-JIS games are supported so far".into());
+        let patch = PkPatch::find(&root)?.map(Arc::new);
+        let encoding = match config.encoding {
+            Encoding::ShiftJis => TextEncoding::ShiftJis,
+            Encoding::Gbk => TextEncoding::Gbk,
+            Encoding::Automatic if patch.is_some() => TextEncoding::Gbk,
+            Encoding::Automatic => TextEncoding::ShiftJis,
+        };
+        // Text and font decoding read it on the thread that runs the game.
+        cmvs_core::encoding::set(encoding);
+        if let Some(patch) = &patch {
+            log::emit(
+                log::INFO,
+                &format!(
+                    "translation patch: {} files in Pk, text {encoding:?}",
+                    patch.len()
+                ),
+            );
         }
         let font = font_renderer(&config.fonts)?;
         let selection = select::select(&root)?;
@@ -128,8 +150,18 @@ impl Session {
         // `Startup` borrows the start script for its whole life. A session lives
         // about as long as the app, and a start script is a few kilobytes, so it is
         // leaked rather than made self-referential.
-        let script: &'static _ = Box::leak(Box::new(load_start(&root, &selection.game.files)?));
+        let start = match patch
+            .as_ref()
+            .map(|p| p.script(b"start.ps3"))
+            .transpose()?
+            .flatten()
+        {
+            Some(raw) => Script::decode_patch(&raw)?,
+            None => load_start(&root, &selection.game.files)?,
+        };
+        let script: &'static _ = Box::leak(Box::new(start));
         let mut startup = Startup::new(script, &root, &selection.game, 0)?;
+        startup.set_patch(patch.map(|p| p as Arc<dyn PatchFiles>));
         if selection.lenient() {
             startup.set_allow_presumed(true);
             startup.set_allow_unreviewed(true);
@@ -160,6 +192,7 @@ impl Session {
         Ok(Self {
             startup,
             root,
+            encoding,
             bindings,
             input: MobileInput::default(),
             display: DisplayState {
@@ -296,6 +329,7 @@ impl Session {
     /// Runs the game for up to one step budget after `dt_ms` of wall time, then
     /// advances effects and draws when the VM reached a frame boundary.
     pub fn step(&mut self, dt_ms: u32) -> Status {
+        cmvs_core::encoding::set(self.encoding);
         if self.status != Status::Running {
             return self.status.clone();
         }
@@ -426,6 +460,7 @@ impl Session {
 
     /// The current frame drawn on the CPU (tests and thumbnails; no GPU needed).
     pub fn render_cpu(&mut self) -> Result<RgbaImage> {
+        cmvs_core::encoding::set(self.encoding);
         if let Some(image) = self.startup.movie_frame() {
             return Ok(image.clone());
         }

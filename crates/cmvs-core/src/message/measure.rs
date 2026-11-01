@@ -33,10 +33,8 @@ struct Layout<'a> {
     previous: u16,
 }
 
-/// 0x140008080: Shift-JIS lead bytes, without checking the trail byte.
-pub(super) fn lead(byte: u8) -> bool {
-    (0x81..=0x9f).contains(&byte) || (0xe0..=0xfc).contains(&byte)
-}
+/// 0x140008080: lead bytes of the game encoding, without checking the trail byte.
+pub(super) use crate::encoding::lead;
 
 impl Layout<'_> {
     fn limit(&self) -> u32 {
@@ -100,7 +98,7 @@ impl Layout<'_> {
                 }
                 self.newline(true, true)?;
             }
-        } else if self.x >= self.limit() && !matches!(code, 0x8141 | 0x8142 | 0x8176 | 0x8178) {
+        } else if self.x >= self.limit() && !crate::encoding::no_break(code) {
             // This branch increments the line number without resetting the byte count.
             self.newline(false, true)?;
         }

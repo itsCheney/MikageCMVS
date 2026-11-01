@@ -51,17 +51,13 @@ fn substring(vm: &mut Machine<'_>, pc: usize) -> Result<(), DecodeError> {
         let Some(&byte) = bytes.get(index) else {
             break;
         };
-        let width = if (0x81..=0x9f).contains(&byte) || (0xe0..=0xfc).contains(&byte) {
-            2
-        } else {
-            1
-        };
+        let width = if crate::encoding::lead(byte) { 2 } else { 1 };
         let next = index + width;
         if next > bytes.len() {
             return Err(error(
                 pc,
                 0x20f3,
-                "substring ends with an incomplete Shift-JIS pair",
+                "substring ends with an incomplete double-byte pair",
             ));
         }
         output.extend_from_slice(&bytes[index..next]);
@@ -118,7 +114,7 @@ fn equal_ignoring_ascii_case(first: &[u8], second: &[u8]) -> Result<bool, &'stat
     let mut i = 0;
     while at(first, i) != 0 {
         let b = at(first, i);
-        if (0x81..=0x9f).contains(&b) || (0xe0..=0xfc).contains(&b) {
+        if crate::encoding::lead(b) {
             if b != at(second, i) || at(first, i + 1) != at(second, i + 1) {
                 return Ok(false);
             }

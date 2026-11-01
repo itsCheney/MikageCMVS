@@ -705,6 +705,7 @@ fn run() -> Result<(), Box<dyn Error>> {
                         &mut DirectoryMovies {
                             root,
                             directory: paths.get(&(0x2015, 0)).map(Vec::as_slice),
+                            patch: None,
                         },
                         audio.settings(),
                         &mut audio_backend,

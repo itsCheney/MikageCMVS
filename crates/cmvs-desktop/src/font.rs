@@ -98,9 +98,9 @@ fn character(code: u16) -> Result<char, FormatError> {
     } else {
         &pair[..]
     };
-    let text = encoding_rs::SHIFT_JIS
+    let text = game_encoding()
         .decode_without_bom_handling_and_without_replacement(bytes)
-        .ok_or(FormatError("invalid Shift-JIS glyph code"))?;
+        .ok_or(FormatError("invalid glyph code for the game encoding"))?;
     let mut chars = text.chars();
     let ch = chars.next().ok_or(FormatError("empty glyph code"))?;
     if chars.next().is_some() || ch == '\0' {
@@ -109,6 +109,14 @@ fn character(code: u16) -> Result<char, FormatError> {
         ));
     }
     Ok(ch)
+}
+
+/// The encoding of glyph codes and face names (cmvs_core::encoding, set per thread).
+pub(crate) fn game_encoding() -> &'static encoding_rs::Encoding {
+    match cmvs_core::encoding::current() {
+        cmvs_core::encoding::TextEncoding::ShiftJis => encoding_rs::SHIFT_JIS,
+        cmvs_core::encoding::TextEncoding::Gbk => encoding_rs::GBK,
+    }
 }
 
 fn rgb(color: u32) -> [u8; 3] {

@@ -35,13 +35,19 @@ pub struct ImageRead {
 pub struct ImageArchives {
     archives: ResourceArchives,
     cache: Cache,
+    patch: Option<std::sync::Arc<dyn crate::patch::PatchFiles>>,
 }
 impl ImageArchives {
     pub fn new(root: impl AsRef<Path>) -> Result<Self, Box<dyn Error>> {
         Ok(Self {
             archives: ResourceArchives::new(root)?,
             cache: Cache::default(),
+            patch: None,
         })
+    }
+    /// Images of a translation patch, read before the registered entries.
+    pub fn set_patch(&mut self, patch: Option<std::sync::Arc<dyn crate::patch::PatchFiles>>) {
+        self.patch = patch;
     }
     pub fn with_paths<'a>(
         &'a mut self,
@@ -50,15 +56,20 @@ impl ImageArchives {
         Registered {
             inner: self.archives.with_paths(paths, ResourceKind::Image),
             cache: &mut self.cache,
+            patch: self.patch.as_deref(),
         }
     }
 }
 pub struct Registered<'a> {
     inner: RegisteredResources<'a>,
     cache: &'a mut Cache,
+    patch: Option<&'a dyn crate::patch::PatchFiles>,
 }
 impl ImageSource for Registered<'_> {
     fn read(&mut self, name: &[u8]) -> Result<Option<Vec<u8>>, Box<dyn Error>> {
+        if let Some(bytes) = self.patch.map(|p| p.image(name)).transpose()?.flatten() {
+            return Ok(Some(bytes));
+        }
         self.cache.read(name, &mut self.inner)
     }
     fn cache_next_read(&mut self) -> Result<(), Box<dyn Error>> {
@@ -66,6 +77,12 @@ impl ImageSource for Registered<'_> {
         Ok(())
     }
     fn read_image(&mut self, name: &[u8]) -> Result<Option<ImageRead>, Box<dyn Error>> {
+        if let Some(bytes) = self.patch.map(|p| p.image(name)).transpose()?.flatten() {
+            return Ok(Some(ImageRead {
+                bytes,
+                cache_key: None,
+            }));
+        }
         self.cache.begin(name, &mut self.inner)
     }
     fn finish_image(&mut self, read: ImageRead) {
@@ -102,6 +119,10 @@ pub fn decode(bytes: &[u8]) -> Result<Option<DecodedImage>, FormatError> {
                 2 | 4 | 7 | 8 => Err(unsupported),
                 _ => Ok(None),
             }
+        }
+        b"RGBA" => {
+            let (pixels, alpha) = crate::patch::parse_raw_image(bytes)?;
+            Ok(Some(DecodedImage { pixels, alpha }))
         }
         [0x89, b'P', b'N', b'G'] | b"MSK0" | b"PB2A" | [b'B', b'M', ..] => Err(unsupported),
         _ => Ok(None),

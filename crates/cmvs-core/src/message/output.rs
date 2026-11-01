@@ -263,7 +263,7 @@ pub(super) fn ruby_layout(
                 .ok_or("truncated double-byte message character")?;
             i += 2;
             let code = u16::from_be_bytes([byte, second]);
-            (size, !matches!(code, 0x8141 | 0x8142 | 0x8176 | 0x8178))
+            (size, !crate::encoding::no_break(code))
         } else {
             i += 1;
             (size >> 1, true)
@@ -285,7 +285,7 @@ pub(super) fn ruby_layout(
 /// one; past the unsigned limit they wrap as well.
 fn wraps(text: &mut TextObject, code: u16, x: u32, limit: u32) -> Result<bool, &'static str> {
     Ok(match &text.line_break {
-        None => x >= limit && !matches!(code, 0x8141 | 0x8142 | 0x8176 | 0x8178),
+        None => x >= limit && !crate::encoding::no_break(code),
         Some(_) if x < limit => {
             text.layout_scratch[1] = u32::from(code);
             false
@@ -541,14 +541,14 @@ fn append(
                 text.layout_scratch = [0; 2];
             }
         }
-        let gx = if code == 0x814a {
+        let gx = if code == crate::encoding::voiced_mark() {
             x.wrapping_sub(size / 5)
         } else {
             x
         };
         last = Some(push(text, code, [gx, y], size, settings.outline)?);
         delay = retime(text, last, delay, interval, instant, settings)?;
-        let advance = if code == 0x814a {
+        let advance = if code == crate::encoding::voiced_mark() {
             (size >> 1).wrapping_sub(size / 5)
         } else if wide {
             size
@@ -646,7 +646,7 @@ fn place(
                 text.layout_scratch = [0; 2];
             }
         }
-        let (gx, advance) = if code == 0x814a {
+        let (gx, advance) = if code == crate::encoding::voiced_mark() {
             (x.wrapping_sub(size / 5), (size >> 1).wrapping_sub(size / 5))
         } else {
             (x, size)

@@ -19,7 +19,7 @@ extern "C" {
  * the session (the main thread). Strings are UTF-8 and borrowed for the
  * duration of the call. */
 
-#define CMVS_ABI_VERSION 1u
+#define CMVS_ABI_VERSION 2u
 
 typedef struct CmvsSession CmvsSession;
 typedef struct CmvsAudio CmvsAudio;
@@ -28,9 +28,16 @@ typedef struct {
     uint32_t struct_size;   /* sizeof(CmvsConfig) */
     const char *game_dir;   /* the game folder (with data/pack/start.ps3) */
     const char *save_dir;   /* saves and settings, or NULL for <game_dir>/savedata */
-    uint32_t encoding;      /* 0 Shift-JIS; 1 GBK (not supported yet: open fails) */
+    uint32_t encoding;      /* one of CMVS_ENCODING_* */
     int64_t utc_offset_ms;  /* local time offset, for the dates on save slots */
 } CmvsConfig;
+
+enum {
+    CMVS_ENCODING_AUTOMATIC = 0, /* GBK when the game has a Chinese patch in Pk/
+                                    (e.g. 茶组's アマツツミ), else Shift-JIS */
+    CMVS_ENCODING_SHIFT_JIS = 1,
+    CMVS_ENCODING_GBK = 2,
+};
 
 enum {
     CMVS_RUNNING = 0,
@@ -74,7 +81,9 @@ void cmvs_clear_fonts(void);
 /* Opens and boots a game. NULL on failure (see cmvs_last_error). Games that
  * the engine has not recorded (updated releases, patched copies) still open:
  * the profile is taken from the engine executable in the folder, or the
- * 2016 baseline, and the log says so. */
+ * 2016 baseline, and the log says so. A translation patch that hooks the
+ * engine with a DLL and keeps its files in Pk/*.pk (scripts, PNG images) and
+ * Pk/*.cmv (movies) is read in place of the game's own files. */
 CmvsSession *cmvs_open(const CmvsConfig *config);
 
 /* The game's screen size in pixels (1280 x 720). */
