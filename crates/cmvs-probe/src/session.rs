@@ -178,6 +178,11 @@ impl<'a> Session<'a> {
     ) -> Result<Self, String> {
         let game = target.game.as_ref().ok_or("no engine profile selected")?;
         let mut run = Startup::new(script, &target.root, game, 0).map_err(|e| e.to_string())?;
+        if let Some(patch) = &target.patch {
+            run.set_patch(Some(
+                patch.clone() as std::sync::Arc<dyn cmvs_core::patch::PatchFiles>
+            ));
+        }
         run.set_allow_presumed(options.allow_presumed);
         run.set_allow_unreviewed(options.allow_unreviewed);
         run.set_user_data_directory(user)

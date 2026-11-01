@@ -30,6 +30,15 @@ pub struct StartRun {
 
 pub fn load_script(target: &Target) -> Result<Script, String> {
     let files = target.files.as_ref().ok_or("game files not found")?;
+    if let Some(patch) = &target.patch {
+        use cmvs_core::patch::PatchFiles;
+        if let Some(raw) = patch
+            .script(&files.start_name())
+            .map_err(|e| e.to_string())?
+        {
+            return Script::decode_patch(&raw).map_err(|e| e.to_string());
+        }
+    }
     load_start(&target.root, files).map_err(|e| e.to_string())
 }
 

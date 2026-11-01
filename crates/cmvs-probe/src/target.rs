@@ -38,6 +38,8 @@ pub mod cap {
     pub const SNAPSHOT_LAYOUT: &str = "snapshot-layout";
     /// A font file was supplied for glyph metrics.
     pub const FONT: &str = "font";
+    /// A translation patch (`Pk/*.pk`) is served before the game's files, with GBK text.
+    pub const PATCH: &str = "patch";
 }
 
 pub struct Target {
@@ -48,6 +50,7 @@ pub struct Target {
     pub identify_error: Option<String>,
     pub key_bindings: Option<KeyBindings>,
     pub capabilities: BTreeSet<&'static str>,
+    pub patch: Option<std::sync::Arc<cmvs_mobile::patch::PkPatch>>,
 }
 
 impl Target {
@@ -115,6 +118,14 @@ impl Target {
         if key_bindings.is_some() {
             capabilities.insert(cap::KEY_CONFIG);
         }
+        let patch = cmvs_mobile::patch::PkPatch::find(root)
+            .ok()
+            .flatten()
+            .map(std::sync::Arc::new);
+        if patch.is_some() {
+            capabilities.insert(cap::PATCH);
+            cmvs_core::encoding::set(cmvs_core::encoding::TextEncoding::Gbk);
+        }
         Self {
             root: root.to_path_buf(),
             files,
@@ -122,6 +133,7 @@ impl Target {
             identify_error,
             key_bindings,
             capabilities,
+            patch,
         }
     }
     pub fn has(&self, capability: &str) -> bool {

@@ -17,4 +17,6 @@ path = "src/main.rs"
 [dependencies]
 cmvs-core = { path = "../cmvs-core" }
 cmvs-desktop = { path = "../cmvs-desktop" }
+# Mikage: translation patches in Pk/ (cmvs_mobile::patch).
+cmvs-mobile = { path = "../cmvs-mobile" }
 encoding_rs.workspace = true

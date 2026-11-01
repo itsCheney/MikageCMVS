@@ -116,7 +116,8 @@ void cmvs_set_focused(CmvsSession *session, int32_t focused);
  * per session. cmvs_audio_render never blocks or allocates, so it can run on
  * a real-time audio thread; call it from one thread at a time. What is
  * rendered runs about 93 ms ahead of the game's sound positions. Release it
- * after cmvs_close. */
+ * after cmvs_close. Movies follow their soundtrack's position, so they
+ * advance only while the host renders this output. */
 CmvsAudio *cmvs_audio(CmvsSession *session);
 uint32_t cmvs_audio_sample_rate(void);
 /* Writes frames interleaved stereo float samples (2 * frames floats). */
