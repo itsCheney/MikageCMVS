@@ -19,7 +19,7 @@ extern "C" {
  * the session (the main thread). Strings are UTF-8 and borrowed for the
  * duration of the call. */
 
-#define CMVS_ABI_VERSION 2u
+#define CMVS_ABI_VERSION 3u
 
 typedef struct CmvsSession CmvsSession;
 typedef struct CmvsAudio CmvsAudio;
@@ -115,6 +115,10 @@ void cmvs_key(CmvsSession *session, int32_t vk, int32_t down);
 /* The app left (0) or regained (1) the foreground: held keys are released
  * and the game sees its window lose focus. */
 void cmvs_set_focused(CmvsSession *session, int32_t focused);
+/* Asks the game to close as its window's close box does: 1 when the script's
+ * own confirmation will run (the session ends if the player agrees), 0 when
+ * the game has none right now and the host should close it itself. */
+int32_t cmvs_request_close(CmvsSession *session);
 
 /* Sound: an output fed from the session's mixer by a thread of its own, once
  * per session. cmvs_audio_render never blocks or allocates, so it can run on

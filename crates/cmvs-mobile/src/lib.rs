@@ -34,7 +34,7 @@ use std::{
 };
 
 /// `CMVS_ABI_VERSION`.
-pub const ABI_VERSION: u32 = 2;
+pub const ABI_VERSION: u32 = 3;
 
 /// `CmvsConfig`.
 #[repr(C)]
@@ -378,6 +378,18 @@ pub unsafe extern "C" fn cmvs_set_focused(session: *mut CmvsSession, focused: i3
         // SAFETY: as in cmvs_set_surface.
         if let Some(CmvsSession(s)) = unsafe { session.as_mut() } {
             s.set_focused(focused != 0);
+        }
+    })
+}
+
+#[unsafe(no_mangle)]
+#[allow(unsafe_code)]
+pub unsafe extern "C" fn cmvs_request_close(session: *mut CmvsSession) -> i32 {
+    guard(0, || {
+        // SAFETY: as in cmvs_set_surface.
+        match unsafe { session.as_mut() } {
+            Some(CmvsSession(s)) => i32::from(s.request_close()),
+            None => 0,
         }
     })
 }

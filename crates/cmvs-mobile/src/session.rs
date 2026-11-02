@@ -299,6 +299,18 @@ impl Session {
         }
     }
     /// The app left (false) or regained (true) the foreground.
+    /// Asks the game to close the way its window's close box does: the
+    /// script's confirmation runs (「終了しますか」) and quits the game if the
+    /// player agrees. False when the game has no such handler right now.
+    pub fn request_close(&mut self) -> bool {
+        let queued = self.startup.request_close();
+        log::emit(
+            log::INFO,
+            &format!("close requested, handled by script: {queued}"),
+        );
+        queued
+    }
+
     pub fn set_focused(&mut self, focused: bool) {
         if !focused {
             self.input.clear(self.startup.input_mut());

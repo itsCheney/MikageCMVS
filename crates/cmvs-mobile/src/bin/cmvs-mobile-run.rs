@@ -22,7 +22,7 @@ extern "C" fn print_log(
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = std::env::args().skip(1);
     let usage = "usage: cmvs-mobile-run <game-dir> --font <file> [--face <name>] [--save-dir <dir>] \
-                 [--seconds <n>] [--tap-every <ms>] [--tap-at <x>,<y>] [--click <ms>:<x>,<y>]... [--wheel <ms>:<notches>]... \
+                 [--seconds <n>] [--tap-every <ms>] [--tap-at <x>,<y>] [--click <ms>:<x>,<y>]... [--wheel <ms>:<notches>]... [--close <ms>]... \
                  [--shot <out.png>]";
     let game_dir = args.next().ok_or(usage)?;
     let (mut font, mut face, mut save_dir, mut shot) = (None, None, None, None);
@@ -30,6 +30,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut tap_at = (640.0f64, 600.0f64);
     let mut clicks: Vec<(u32, (f64, f64))> = Vec::new();
     let mut wheels: Vec<(u32, i32)> = Vec::new();
+    let mut closes: Vec<u32> = Vec::new();
     while let Some(flag) = args.next() {
         let value = args.next().ok_or(usage)?;
         match flag.as_str() {
@@ -47,6 +48,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let (ms, notches) = value.split_once(':').ok_or(usage)?;
                 wheels.push((ms.parse()?, notches.parse()?));
             }
+            "--close" => closes.push(value.parse()?),
             "--shot" => shot = Some(value),
             _ => return Err(usage.into()),
         }
@@ -90,6 +92,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .filter(|(ms, _)| (now..now + frame_ms).contains(ms))
         {
             session.wheel(notches);
+        }
+        if closes.iter().any(|ms| (now..now + frame_ms).contains(ms)) {
+            eprintln!("# close at {now} ms: {}", session.request_close());
         }
         status = session.step(frame_ms);
         if let Some(sound) = &mut sound {

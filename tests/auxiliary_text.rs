@@ -1277,7 +1277,6 @@ fn half_width_text_advances_half_a_cell_like_the_measurement() {
     );
 }
 
-
 #[test]
 fn measurement_counts_lines_and_byte_columns_from_the_pen() {
     for (text, expected) in [
