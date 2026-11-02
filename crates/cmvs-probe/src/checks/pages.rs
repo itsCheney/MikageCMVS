@@ -21,8 +21,6 @@ use std::fs;
 
 /// Steps from a node before the graph stops expanding.
 const MAX_DEPTH: usize = 3;
-/// Trials per graph; each replays a path from a fresh start.
-const MAX_TRIALS: usize = 400;
 /// Frames an action gets to settle on a page or reach a message wait.
 const STEP_FRAMES: u64 = 3600;
 /// Buttons tried per page; larger pages are sampled evenly.
@@ -76,19 +74,11 @@ enum Place {
 impl Place {
     fn key(&self) -> String {
         match self {
-            // Coarse: positions and enabled states change with slider values and unlocks,
-            // the group layout of a page does not.
             Self::Page(p) => {
-                let groups: Vec<_> = p.groups.iter().map(|g| (g.slot, g.buttons)).collect();
-                // List visibility changes while scrolling or switching categories.
-                // Keep those states distinct so their newly visible controls are tried.
-                let lists: Vec<_> = p
-                    .groups
-                    .iter()
-                    .filter(|g| g.slot >= cmvs_core::buttons::BUTTON_GROUPS)
-                    .map(|g| (g.slot, g.layout))
-                    .collect();
-                format!("page {} {groups:?} {lists:?}", p.script.escape_ascii())
+                // Ordinary save-page tabs can have equal button counts but different
+                // hit layouts. Keep the complete quantised signature, as for lists,
+                // so switching to another tab is not mistaken for a return edge.
+                format!("page {}", p.digest())
             }
             Self::Wait(w) => format!("wait {} {:x} {}", w.script, w.pc, w.text),
         }
@@ -98,6 +88,71 @@ impl Place {
             Self::Page(p) => p.json(),
             Self::Wait(w) => Json::obj([("wait", w.json())]),
         }
+    }
+}
+
+#[cfg(test)]
+mod page_identity_tests {
+    use super::*;
+    use crate::observe::GroupShape;
+
+    fn state(layout: u8, view: &str) -> State {
+        State {
+            place: Place::Page(PageSignature {
+                script: b"synthetic".to_vec(),
+                groups: vec![GroupShape {
+                    slot: 1,
+                    buttons: 72,
+                    enabled: 72,
+                    layout: [layout; 32],
+                }],
+            }),
+            view: view.into(),
+            variables: "same".into(),
+            settings: "same".into(),
+        }
+    }
+
+    #[test]
+    fn ordinary_tabs_with_equal_counts_have_distinct_replay_identities() {
+        let (first, second) = (state(0, "first"), state(1, "second"));
+        assert_ne!(first.place.key(), second.place.key());
+    }
+
+    #[test]
+    fn genuine_return_with_changed_visible_objects_remains_a_failure() {
+        let first = state(0, "original");
+        let other = state(1, "other");
+        let changed = state(0, "wrong visible objects");
+        let graph = Graph {
+            nodes: vec![first, other.clone()]
+                .into_iter()
+                .map(|state| Node {
+                    label: None,
+                    path: vec![],
+                    state,
+                    in_scenario: false,
+                })
+                .collect(),
+            edges: vec![
+                Edge {
+                    from: 0,
+                    step: Step::Press(1, 0),
+                    to: Some(1),
+                    arrival: Arrival::State(other),
+                    left: None,
+                },
+                Edge {
+                    from: 1,
+                    step: Step::Cancel,
+                    to: Some(0),
+                    arrival: Arrival::State(changed),
+                    left: None,
+                },
+            ],
+            ..Default::default()
+        };
+        assert!(matches!(returns(&graph).outcome, Outcome::Fail(_)));
     }
 }
 
@@ -326,7 +381,7 @@ fn build(
             }
         };
         for step in steps {
-            if graph.trials >= MAX_TRIALS {
+            if graph.trials >= runner.options.max_page_trials {
                 graph.truncated = true;
                 return graph;
             }
@@ -515,7 +570,7 @@ fn traversal(graph: &Graph) -> CheckResult {
         if graph.nodes.len() < 2 {
             Outcome::Inconclusive("no page beyond the start page was reached".into())
         } else if graph.truncated {
-            Outcome::Inconclusive(format!("the trial budget of {MAX_TRIALS} ran out"))
+            Outcome::Inconclusive(format!("the trial budget of {} ran out", graph.trials))
         } else {
             Outcome::Pass(Level::L0)
         }

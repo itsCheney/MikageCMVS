@@ -122,7 +122,7 @@ fn decode_bmp(bytes: &[u8]) -> Result<RgbaImage, &'static str> {
 }
 
 /// Command inheritance does not establish the wire format of gameplay snapshots.
-/// The independently inspected 20150405 subset uses text v2, and 20171114 uses v3
+/// The independently inspected 20130131/20140217/20150405 subsets use text v2, and 20171114 uses v3
 /// (docs/games/aoitori/vm-semantics.md). Effect configurations have an independent
 /// build binding; unknown image, collision-mesh and effect records remain rejected.
 pub fn snapshot_layout_supported(profile: &crate::profile::EngineProfile) -> bool {
@@ -130,7 +130,11 @@ pub fn snapshot_layout_supported(profile: &crate::profile::EngineProfile) -> boo
 }
 
 fn snapshot_layout(profile: &crate::profile::EngineProfile) -> Option<SnapshotLayout> {
-    if profile.id == "cmvs-20150405" && profile.base.as_deref() == Some("cmvs-20160201") {
+    if matches!(
+        profile.id.as_str(),
+        "cmvs-20130131" | "cmvs-20140217" | "cmvs-20150405"
+    ) && profile.base.as_deref() == Some("cmvs-20160201")
+    {
         Some(SnapshotLayout::TextV2)
     } else if profile.base.is_none()
         || (profile.id == "cmvs-20171114" && profile.base.as_deref() == Some("cmvs-20160201"))
@@ -148,7 +152,43 @@ fn effect_layout_supported(profile: &crate::profile::EngineProfile) -> bool {
         && profile.base.as_deref() == Some("cmvs-20160201")
 }
 
+/// 20130131 writer 0x1400330b0 and 20140217 writer 0x1400375d0 visit 512 children.
+/// The former has no lists; the latter's list record layout is not enabled here.
+fn validate_20130131_records<'a>(
+    scenes: impl Iterator<Item = &'a SavedScene>,
+    has_lists: bool,
+) -> Result<(), Box<dyn Error>> {
+    fn scene_supported(scene: &SavedScene) -> bool {
+        scene
+            .children
+            .iter()
+            .all(|(&slot, child)| slot < 512 && scene_supported(child))
+    }
+    if has_lists {
+        return Err("button-list snapshot records are not supported for this build".into());
+    }
+    if !scenes.into_iter().all(scene_supported) {
+        return Err("snapshot child slot exceeds this build's 512-entry table".into());
+    }
+    Ok(())
+}
+
 impl Startup<'_> {
+    fn validate_build_snapshot(&self, snapshot: &EngineSnapshot) -> Result<(), Box<dyn Error>> {
+        if matches!(
+            self.gate.selection().profile.id.as_str(),
+            "cmvs-20130131" | "cmvs-20140217"
+        ) {
+            validate_20130131_records(
+                snapshot
+                    .objects
+                    .values()
+                    .chain(snapshot.windows.iter().flatten().map(|w| &w.scene)),
+                snapshot.raw_objects.keys().any(|&(tag, _)| tag == 0x8c8),
+            )?;
+        }
+        Ok(())
+    }
     fn require_snapshot_layout(&self) -> Result<SnapshotLayout, Box<dyn Error>> {
         let profile = self.gate.selection().profile;
         snapshot_layout(profile).ok_or_else(|| {
@@ -267,6 +307,7 @@ impl Startup<'_> {
             sound_channels: self.audio.saved_channels(),
             sound_device: vec![1, 0, 0, 0, 0, 0],
         };
+        self.validate_build_snapshot(&snapshot)?;
         Ok((snapshot, vm.main_image))
     }
 
@@ -449,6 +490,7 @@ impl Startup<'_> {
             .ok_or("save slot to load does not exist")?;
         let save = Csv2Save::decode(&bytes)?;
         let snapshot = EngineSnapshot::decode_with_layout(&save.snapshot, layout)?;
+        self.validate_build_snapshot(&snapshot)?;
         if slot < 950 && matches!(self.save_image, SaveImage::Captured(_)) {
             self.write_slot(LOAD_BACKUP_SLOT, true)?;
         }
@@ -837,6 +879,8 @@ mod layout_tests {
     fn snapshot_layout_requires_an_independently_inspected_build() {
         let registry = crate::profile::Registry::builtin();
         for (id, layout) in [
+            ("cmvs-20130131", SnapshotLayout::TextV2),
+            ("cmvs-20140217", SnapshotLayout::TextV2),
             ("cmvs-20150405", SnapshotLayout::TextV2),
             ("cmvs-20171114", SnapshotLayout::TextV3),
             ("cmvs-20160201", SnapshotLayout::TextV3),
@@ -855,5 +899,18 @@ mod layout_tests {
         profile.base = Some("uninspected-base".into());
         assert_eq!(snapshot_layout(&profile), None);
         assert!(!effect_layout_supported(&profile));
+    }
+
+    #[test]
+    fn older_snapshot_rejects_lists_and_nested_children_beyond_its_table() {
+        let leaf = SavedScene::from_object(&SceneObject::default()).unwrap();
+        let mut parent = leaf.clone();
+        parent.children.insert(511, leaf.clone());
+        assert!(validate_20130131_records(std::iter::once(&parent), false).is_ok());
+        assert!(validate_20130131_records(std::iter::once(&parent), true).is_err());
+        let mut nested = leaf.clone();
+        nested.children.insert(512, leaf);
+        parent.children.insert(0, nested);
+        assert!(validate_20130131_records(std::iter::once(&parent), false).is_err());
     }
 }

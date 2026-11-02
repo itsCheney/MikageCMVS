@@ -278,7 +278,7 @@ binary x86 file=cmvs32.exe sha256=943a0f9e0a1b7ba420df16c6963d96a4da7be56a2ab504
 0x2108 unreviewed 0x89d66 0x7a460
 0x2109 unreviewed 0x89d73 0x7a46a
 0x210a unreviewed 0x89d80 0x7a474
-0x210b unreviewed 0x89d8d 0x7a47e research=font-cells:x64:5f949df9b8aaa56c57594f317819b6f657f99393de65494873f08bebddb48b7f evidence=games/aoitori/mikage-20171129.md
+0x210b unreviewed 0x89d8d 0x7a47e variant=font-cells:x64:5f949df9b8aaa56c57594f317819b6f657f99393de65494873f08bebddb48b7f evidence=games/aoitori/mikage-20171129.md
 0x210c unreviewed 0x89d9a 0x7a488
 0x210d unreviewed 0x89da7 0x7a492
 0x210e unreviewed 0x89db4 0x7a49c
@@ -296,7 +296,7 @@ binary x86 file=cmvs32.exe sha256=943a0f9e0a1b7ba420df16c6963d96a4da7be56a2ab504
 0x211a unreviewed 0x89e50 0x7a514
 0x211b noop 0x890d7 0x79bc3
 0x211c unreviewed 0x89e5d 0x7a51e
-0x211d unreviewed 0x89e6a 0x7a528 research=font-cells:x64:5f949df9b8aaa56c57594f317819b6f657f99393de65494873f08bebddb48b7f evidence=games/aoitori/mikage-20171129.md
+0x211d unreviewed 0x89e6a 0x7a528 variant=font-cells:x64:5f949df9b8aaa56c57594f317819b6f657f99393de65494873f08bebddb48b7f evidence=games/aoitori/mikage-20171129.md
 0x211e unreviewed 0x89e77 0x7a532
 0x211f unreviewed 0x89e84 0x7a53c
 0x2120 unreviewed 0x89e91 0x7a546
@@ -349,14 +349,14 @@ binary x86 file=cmvs32.exe sha256=943a0f9e0a1b7ba420df16c6963d96a4da7be56a2ab504
 0x214f unreviewed 0x8a0d3 0x7a712
 0x2150 unreviewed 0x8a0e0 0x7a71c
 0x2151 unreviewed 0x8a0ed 0x7a726
-0x2152 unreviewed 0x8a0fa 0x7a730 research=font-cells:x64:5f949df9b8aaa56c57594f317819b6f657f99393de65494873f08bebddb48b7f evidence=games/aoitori/mikage-20171129.md
+0x2152 unreviewed 0x8a0fa 0x7a730 variant=font-cells:x64:5f949df9b8aaa56c57594f317819b6f657f99393de65494873f08bebddb48b7f evidence=games/aoitori/mikage-20171129.md
 0x2153 unreviewed 0x8a107 0x7a73a
-0x2154 unreviewed 0x8a114 0x7a744 research=font-cells:x64:5f949df9b8aaa56c57594f317819b6f657f99393de65494873f08bebddb48b7f evidence=games/aoitori/mikage-20171129.md
+0x2154 unreviewed 0x8a114 0x7a744 variant=font-cells:x64:5f949df9b8aaa56c57594f317819b6f657f99393de65494873f08bebddb48b7f evidence=games/aoitori/mikage-20171129.md
 0x2155 unreviewed 0x8a121 0x7a74e
 0x2156 unreviewed 0x8a12e 0x7a758
-0x2157 unreviewed 0x8a13b 0x7a762 research=font-cells:x64:5f949df9b8aaa56c57594f317819b6f657f99393de65494873f08bebddb48b7f evidence=games/aoitori/mikage-20171129.md
+0x2157 unreviewed 0x8a13b 0x7a762 variant=font-cells:x64:5f949df9b8aaa56c57594f317819b6f657f99393de65494873f08bebddb48b7f evidence=games/aoitori/mikage-20171129.md
 0x2158 unreviewed 0x8a148 0x7a76c
-0x2159 unreviewed 0x8a155 0x7a776 research=font-cells:x64:5f949df9b8aaa56c57594f317819b6f657f99393de65494873f08bebddb48b7f evidence=games/aoitori/mikage-20171129.md
+0x2159 unreviewed 0x8a155 0x7a776 variant=font-cells:x64:5f949df9b8aaa56c57594f317819b6f657f99393de65494873f08bebddb48b7f evidence=games/aoitori/mikage-20171129.md
 0x215a unreviewed 0x8a162 0x7a780
 0x215b unreviewed 0x8a16f 0x7a78a
 0x215c unreviewed 0x8a17c 0x7a794
@@ -685,13 +685,13 @@ binary x86 file=cmvs32.exe sha256=943a0f9e0a1b7ba420df16c6963d96a4da7be56a2ab504
 0x229f noop 0x890d7 0x79bc3
 0x22a0 unreviewed 0x8ae32 0x7b184
 0x22a1 unreviewed 0x8ae3f 0x7b18e
-0x22a2 unreviewed 0x8ae4c 0x7b198 research=falling-billboards:x64:5f949df9b8aaa56c57594f317819b6f657f99393de65494873f08bebddb48b7f evidence=games/aoitori/mikage-20171129.md
+0x22a2 unreviewed 0x8ae4c 0x7b198 variant=falling-billboards:x64:5f949df9b8aaa56c57594f317819b6f657f99393de65494873f08bebddb48b7f evidence=games/aoitori/mikage-20171129.md
 0x22a3 unreviewed 0x8ae59 0x7b1a2
 0x22a4 unreviewed 0x8ae66 0x7b1ac
-0x22a5 unreviewed 0x8ae73 0x7b1b6 research=particles:x64:5f949df9b8aaa56c57594f317819b6f657f99393de65494873f08bebddb48b7f evidence=games/aoitori/mikage-20171129.md
-0x22a6 unreviewed 0x8ae80 0x7b1c0 research=collision-particles:x64:5f949df9b8aaa56c57594f317819b6f657f99393de65494873f08bebddb48b7f evidence=games/aoitori/mikage-20171129.md
+0x22a5 unreviewed 0x8ae73 0x7b1b6 variant=particles:x64:5f949df9b8aaa56c57594f317819b6f657f99393de65494873f08bebddb48b7f evidence=games/aoitori/mikage-20171129.md
+0x22a6 unreviewed 0x8ae80 0x7b1c0 variant=collision-particles:x64:5f949df9b8aaa56c57594f317819b6f657f99393de65494873f08bebddb48b7f evidence=games/aoitori/mikage-20171129.md
 0x22a7 unreviewed 0x8ae8d 0x7b1ca
-0x22a8 unreviewed 0x8ae9a 0x7b1d4 research=fragments:x64:5f949df9b8aaa56c57594f317819b6f657f99393de65494873f08bebddb48b7f evidence=games/aoitori/mikage-20171129.md
+0x22a8 unreviewed 0x8ae9a 0x7b1d4 variant=fragments:x64:5f949df9b8aaa56c57594f317819b6f657f99393de65494873f08bebddb48b7f evidence=games/aoitori/mikage-20171129.md
 0x22a9 unreviewed 0x8aea7 0x7b1de
 0x22aa noop 0x890d7 0x79bc3
 0x22ab noop 0x890d7 0x79bc3
@@ -760,7 +760,7 @@ binary x86 file=cmvs32.exe sha256=943a0f9e0a1b7ba420df16c6963d96a4da7be56a2ab504
 0x22ea unreviewed 0x8b20f 0x7b44e
 0x22eb unreviewed 0x8b21c 0x7b458
 0x22ec unreviewed 0x8b229 0x7b462
-0x22ed unreviewed 0x8b236 0x7b46c research=background-audio:x64:5f949df9b8aaa56c57594f317819b6f657f99393de65494873f08bebddb48b7f evidence=games/aoitori/mikage-20171129.md
+0x22ed unreviewed 0x8b236 0x7b46c variant=background-audio:x64:5f949df9b8aaa56c57594f317819b6f657f99393de65494873f08bebddb48b7f evidence=games/aoitori/mikage-20171129.md
 0x22ee unreviewed 0x8b243 0x7b476
 0x22ef unreviewed 0x8b263 0x7b491
 0x22f0 unreviewed 0x8b270 0x7b49b
@@ -827,9 +827,9 @@ binary x86 file=cmvs32.exe sha256=943a0f9e0a1b7ba420df16c6963d96a4da7be56a2ab504
 0x232d noop 0x890d7 0x79bc3
 0x232e noop 0x890d7 0x79bc3
 0x232f noop 0x890d7 0x79bc3
-0x2330 unreviewed 0x8b4af 0x7b660 research=collision-particles:x64:5f949df9b8aaa56c57594f317819b6f657f99393de65494873f08bebddb48b7f evidence=games/aoitori/mikage-20171129.md
-0x2331 unreviewed 0x8b4bc 0x7b66a research=collision-particles:x64:5f949df9b8aaa56c57594f317819b6f657f99393de65494873f08bebddb48b7f evidence=games/aoitori/mikage-20171129.md
-0x2332 unreviewed 0x8b4c9 0x7b674 research=collision-particles:x64:5f949df9b8aaa56c57594f317819b6f657f99393de65494873f08bebddb48b7f evidence=games/aoitori/mikage-20171129.md
+0x2330 unreviewed 0x8b4af 0x7b660 variant=collision-particles:x64:5f949df9b8aaa56c57594f317819b6f657f99393de65494873f08bebddb48b7f evidence=games/aoitori/mikage-20171129.md
+0x2331 unreviewed 0x8b4bc 0x7b66a variant=collision-particles:x64:5f949df9b8aaa56c57594f317819b6f657f99393de65494873f08bebddb48b7f evidence=games/aoitori/mikage-20171129.md
+0x2332 unreviewed 0x8b4c9 0x7b674 variant=collision-particles:x64:5f949df9b8aaa56c57594f317819b6f657f99393de65494873f08bebddb48b7f evidence=games/aoitori/mikage-20171129.md
 0x2333 noop 0x890d7 0x79bc3
 0x2334 noop 0x890d7 0x79bc3
 0x2335 noop 0x890d7 0x79bc3
@@ -918,7 +918,7 @@ binary x86 file=cmvs32.exe sha256=943a0f9e0a1b7ba420df16c6963d96a4da7be56a2ab504
 0x2388 unreviewed 0x8b899 0x7b972
 0x2389 unreviewed 0x8b8a6 0x7b97c
 0x238a unreviewed 0x8b8b3 0x7b986
-0x238b unreviewed 0x8b8c0 0x7b990 research=font-cells:x64:5f949df9b8aaa56c57594f317819b6f657f99393de65494873f08bebddb48b7f evidence=games/aoitori/mikage-20171129.md
+0x238b unreviewed 0x8b8c0 0x7b990 variant=font-cells:x64:5f949df9b8aaa56c57594f317819b6f657f99393de65494873f08bebddb48b7f evidence=games/aoitori/mikage-20171129.md
 0x238c unreviewed 0x8b8cd 0x7b99a
 0x238d unreviewed 0x8b8da 0x7b9a4
 0x238e unreviewed 0x8b8e7 0x7b9ae
@@ -951,7 +951,7 @@ binary x86 file=cmvs32.exe sha256=943a0f9e0a1b7ba420df16c6963d96a4da7be56a2ab504
 0x23a9 noop 0x890d7 0x79bc3
 0x23aa noop 0x890d7 0x79bc3
 0x23ab noop 0x890d7 0x79bc3
-0x23ac unreviewed 0x8ba05 0x7ba8a research=font-cells:x64:5f949df9b8aaa56c57594f317819b6f657f99393de65494873f08bebddb48b7f evidence=games/aoitori/mikage-20171129.md
+0x23ac unreviewed 0x8ba05 0x7ba8a variant=font-cells:x64:5f949df9b8aaa56c57594f317819b6f657f99393de65494873f08bebddb48b7f evidence=games/aoitori/mikage-20171129.md
 0x23ad noop 0x890d7 0x79bc3
 0x23ae unreviewed 0x89174 0x79c26
 0x23af noop 0x890d7 0x79bc3
@@ -963,10 +963,10 @@ binary x86 file=cmvs32.exe sha256=943a0f9e0a1b7ba420df16c6963d96a4da7be56a2ab504
 0x23b5 unreviewed 0x892a1 0x79cd0
 0x23b6 noop 0x890d7 0x79bc3
 0x23b7 unreviewed 0x89174 0x79c26
-0x23b8 unreviewed 0x8ba27 0x7baa8 research=font-cells:x64:5f949df9b8aaa56c57594f317819b6f657f99393de65494873f08bebddb48b7f evidence=games/aoitori/mikage-20171129.md
-0x23b9 unreviewed 0x8ba34 0x7bab2 research=font-cells:x64:5f949df9b8aaa56c57594f317819b6f657f99393de65494873f08bebddb48b7f evidence=games/aoitori/mikage-20171129.md
+0x23b8 unreviewed 0x8ba27 0x7baa8 variant=font-cells:x64:5f949df9b8aaa56c57594f317819b6f657f99393de65494873f08bebddb48b7f evidence=games/aoitori/mikage-20171129.md
+0x23b9 unreviewed 0x8ba34 0x7bab2 variant=font-cells:x64:5f949df9b8aaa56c57594f317819b6f657f99393de65494873f08bebddb48b7f evidence=games/aoitori/mikage-20171129.md
 0x23ba unreviewed 0x8ba41 0x7babc
-0x23bb unreviewed 0x8ba4e 0x7bac6 research=font-cells:x64:5f949df9b8aaa56c57594f317819b6f657f99393de65494873f08bebddb48b7f evidence=games/aoitori/mikage-20171129.md
+0x23bb unreviewed 0x8ba4e 0x7bac6 variant=font-cells:x64:5f949df9b8aaa56c57594f317819b6f657f99393de65494873f08bebddb48b7f evidence=games/aoitori/mikage-20171129.md
 0x23bc noop 0x890d7 0x79bc3
 0x23bd noop 0x890d7 0x79bc3
 0x23be noop 0x890d7 0x79bc3

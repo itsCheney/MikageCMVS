@@ -471,9 +471,8 @@ impl AuxiliaryText {
     ) -> Result<bool, &'static str> {
         let no_break = self.word(128).expect("modeled field") != 0;
         let Some(rules) = &self.line_break else {
-            return Ok(
-                self.at_edge_font_cells(x) && (simple || !(no_break && crate::encoding::no_break(code)))
-            );
+            return Ok(self.at_edge_font_cells(x)
+                && (simple || !(no_break && crate::encoding::no_break(code))));
         };
         if !self.at_edge_font_cells(x) {
             scratch[1] = u32::from(code);

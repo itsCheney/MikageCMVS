@@ -173,8 +173,8 @@ impl<'a> Startup<'a> {
     ) -> Result<Self, Box<dyn Error>> {
         let mut machine = Machine::new(script)?;
         if let Some([integers, bits, floats, strings]) = game.selection.profile.initial_globals() {
-            // Verified PE zero-fill globals of these builds (Aoitori evidence:
-            // docs/games/aoitori/vm-semantics.md). Keep standalone
+            // Verified PE zero-fill globals (docs/games/aoitori/vm-semantics.md
+            // and docs/games/hapymaherfd/README.md). Keep standalone
             // research VMs and other profiles unknown until separately verified.
             let state = machine.state_mut();
             state
@@ -318,6 +318,10 @@ impl<'a> Startup<'a> {
     }
     pub fn bootstrap(&self) -> &Bootstrap {
         &self.bootstrap
+    }
+    /// Ask the registered script callback to confirm a host window close.
+    pub fn request_close(&mut self) -> bool {
+        self.control.request_close()
     }
     pub fn control(&self) -> &ScriptControl {
         &self.control

@@ -60,7 +60,7 @@ Output:
   --image-archive <CPZ> --preview-image <name>
                                    show one PB3 image instead of the scene
 
-Keys: F1 default cursor, F2..F5 registered cursor previews after a stop, Esc or close exits.
+Keys: F1 default cursor, F2..F5 registered cursor previews after a stop; close requests exit.
 
 Notes:
   - The profile is identified from the start script, script archive and executables.
@@ -95,6 +95,8 @@ struct GpuDesktop {
     adapter: cmvs_wgpu::wgpu::Adapter,
 }
 struct App<'a> {
+    #[cfg(windows)]
+    masked_cursor: std::cell::RefCell<Option<cmvs_native::MaskedCursor>>,
     frame_boundary: crate::frame_boundary::FrameBoundary,
     use_gpu: bool,
     #[cfg(feature = "wgpu-renderer")]
@@ -298,6 +300,8 @@ impl App<'_> {
             windowed_size: &self.windowed_size,
             fonts: self.font.as_ref(),
             device_frame: self.device_frame.as_deref(),
+            #[cfg(windows)]
+            masked_cursor: &self.masked_cursor,
         };
         backend.apply(&PlatformRequest::Cursor { id, bitmap })?;
         println!("# preview-only cursor shortcut={id}; VM state unchanged");
@@ -384,6 +388,8 @@ impl ApplicationHandler for App<'_> {
                 windowed_size: &self.windowed_size,
                 fonts: self.font.as_ref(),
                 device_frame: self.device_frame.as_deref(),
+                #[cfg(windows)]
+                masked_cursor: &self.masked_cursor,
             };
             let mode =
                 cmvs_core::platform::supported_render_mode(&backend, backend.render_mode()?)?;
@@ -414,7 +420,9 @@ impl ApplicationHandler for App<'_> {
         match event {
             WindowEvent::CloseRequested => {
                 println!("# close requested");
-                el.exit();
+                if self.halted || self.preview_image.is_some() || !self.startup.request_close() {
+                    el.exit();
+                }
             }
             WindowEvent::RedrawRequested => {
                 if let Err(error) = self.redraw() {
@@ -585,6 +593,8 @@ impl ApplicationHandler for App<'_> {
                     windowed_size: &self.windowed_size,
                     fonts: self.font.as_ref(),
                     device_frame: self.device_frame.as_deref(),
+                    #[cfg(windows)]
+                    masked_cursor: &self.masked_cursor,
                 };
                 let had_fade = self.startup.scene().fade().current().is_some();
                 let outcome = self.startup.tick(&mut backend);
@@ -980,6 +990,8 @@ fn run() -> Result<(), Box<dyn Error>> {
     startup.set_random_seed(rand_seed);
     let display_preferences = startup.display_preferences();
     let mut app = App {
+        #[cfg(windows)]
+        masked_cursor: Default::default(),
         frame_boundary: Default::default(),
         use_gpu,
         #[cfg(feature = "wgpu-renderer")]

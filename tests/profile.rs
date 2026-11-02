@@ -888,13 +888,22 @@ fn embedded_profiles_parse_and_bind_the_recorded_games() {
     let base = registry.profile("cmvs-20160201").unwrap();
     let chrono = registry.profile("cmvs-20150405").unwrap();
     let aoitori = registry.profile("cmvs-20171114").unwrap();
+    let hapymaher = registry.profile("cmvs-20130131").unwrap();
+    let hapymaherfd = registry.profile("cmvs-20140217").unwrap();
+    assert_eq!(hapymaherfd.base.as_deref(), Some("cmvs-20160201"));
+    assert_eq!(hapymaherfd.count(CommandStatus::Unreviewed), 701);
     assert_eq!(base.base, None);
     assert_eq!(chrono.base.as_deref(), Some("cmvs-20160201"));
     assert_eq!(aoitori.base.as_deref(), Some("cmvs-20160201"));
+    assert_eq!(hapymaher.base.as_deref(), Some("cmvs-20160201"));
+    assert_eq!(hapymaher.count(CommandStatus::Unreviewed), 639);
+    assert_eq!(hapymaher.status(0x3a0), CommandStatus::Absent);
     for (profile, cases, handlers, noops) in [
         (base, 976, 721, 255),
         (chrono, 976, 712, 264),
         (aoitori, 992, 734, 258),
+        (hapymaher, 928, 639, 289),
+        (hapymaherfd, 976, 701, 275),
     ] {
         assert_eq!(profile.statuses().len(), cases);
         assert_eq!(profile.binaries.len(), 2);
@@ -920,6 +929,8 @@ fn embedded_profiles_parse_and_bind_the_recorded_games() {
     assert_eq!(
         games,
         [
+            ("hapymaher", "cmvs-20130131", None),
+            ("hapymaherfd", "cmvs-20140217", None),
             ("amatsutsumi", "cmvs-20160201", Some(2198)),
             ("aoitori", "cmvs-20171114", None),
             ("chronoclock", "cmvs-20150405", None)
