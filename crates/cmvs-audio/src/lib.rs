@@ -11,8 +11,8 @@ use cmvs_core::{
     resources::{ResourceArchives, ResourceKind, ResourceSource},
 };
 #[cfg(feature = "device")]
-use rodio::{OutputStream, OutputStreamBuilder};
-use rodio::{Sink, Source, mixer::Mixer};
+use rodio::{DeviceSinkBuilder, MixerDeviceSink};
+use rodio::{Player, Source, mixer::Mixer};
 use std::{
     collections::BTreeMap,
     error::Error,
@@ -154,6 +154,7 @@ struct Compression {
     last: bool,
 }
 struct StreamSource {
+    output_enabled: Arc<AtomicBool>,
     program: VorbisProgram,
     compression: Option<Compression>,
     fault: Fault,
@@ -207,7 +208,13 @@ impl Iterator for StreamSource {
             self.pcm()
         };
         match sample {
-            Ok(sample) => sample.map(|x| f32::from(x) / 32768.0),
+            Ok(sample) => sample.map(|x| {
+                if self.output_enabled.load(Ordering::Relaxed) {
+                    f32::from(x) / 32768.0
+                } else {
+                    0.0
+                }
+            }),
             Err(e) => {
                 *self.fault.lock().unwrap() = Some(e.to_string());
                 self.failed = true;
@@ -220,11 +227,13 @@ impl Source for StreamSource {
     fn current_span_len(&self) -> Option<usize> {
         None
     }
-    fn channels(&self) -> u16 {
-        self.program.channels()
+    fn channels(&self) -> rodio::ChannelCount {
+        rodio::ChannelCount::new(self.program.channels())
+            .expect("Vorbis channel count is validated non-zero")
     }
-    fn sample_rate(&self) -> u32 {
-        self.program.sample_rate()
+    fn sample_rate(&self) -> rodio::SampleRate {
+        rodio::SampleRate::new(self.program.sample_rate())
+            .expect("Vorbis sample rate is validated non-zero")
     }
     fn total_duration(&self) -> Option<Duration> {
         None
@@ -261,7 +270,7 @@ impl Envelope {
     }
 }
 struct Channel {
-    sink: Sink,
+    sink: Player,
     fault: Fault,
     envelope: Option<Envelope>,
     release_at_end: bool,
@@ -280,6 +289,7 @@ impl Channel {
 
 /// Opened only with the desktop's explicit `--audio native` option.
 pub struct NativeAudio {
+    output_enabled: Arc<AtomicBool>,
     root: PathBuf,
     paths: BTreeMap<(u16, u32), Vec<u8>>,
     archives: ResourceArchives,
@@ -300,7 +310,7 @@ pub struct NativeAudio {
 /// Where the channels mix to: the default device, or a mixer the host pulls from.
 enum Output {
     #[cfg(feature = "device")]
-    Device(OutputStream),
+    Device(MixerDeviceSink),
     Mixer(Mixer),
 }
 impl Output {
@@ -317,11 +327,11 @@ impl NativeAudio {
     pub fn new(root: &Path) -> Result<Self, Box<dyn Error>> {
         let fault: Fault = Arc::default();
         let copy = fault.clone();
-        let mut stream = OutputStreamBuilder::from_default_device()?
+        let mut stream = DeviceSinkBuilder::from_default_device()?
             .with_error_callback(move |e| {
                 *copy.lock().unwrap() = Some(e.to_string());
             })
-            .open_stream_or_fallback()?;
+            .open_sink_or_fallback()?;
         stream.log_on_drop(false);
         println!(
             "# native audio output: {} Hz, {} channels",
@@ -337,6 +347,7 @@ impl NativeAudio {
     }
     fn with_output(root: &Path, output: Output, fault: Fault) -> Result<Self, Box<dyn Error>> {
         Ok(Self {
+            output_enabled: Arc::new(AtomicBool::new(true)),
             root: root.canonicalize()?,
             paths: BTreeMap::new(),
             archives: ResourceArchives::new(root)?,
@@ -394,12 +405,13 @@ impl NativeAudio {
     ) -> Channel {
         let fault: Fault = Arc::default();
         let looped = program.looped.clone();
-        let sink = Sink::connect_new(self.output.mixer());
+        let sink = Player::connect_new(self.output.mixer());
         sink.pause();
         let gain = volume.min(256) as f32 / 256.0;
         let envelope = (fade_ms != 0).then(|| Envelope::new(0.0, 1.0, fade_ms));
         sink.set_volume(if envelope.is_some() { 0.0 } else { gain });
         sink.append(StreamSource {
+            output_enabled: self.output_enabled.clone(),
             program,
             compression,
             fault: fault.clone(),
@@ -466,6 +478,11 @@ impl NativeAudio {
     }
 }
 impl AudioBackend for NativeAudio {
+    fn set_output_enabled(&mut self, enabled: bool) -> Result<(), Box<dyn Error>> {
+        self.output_enabled.store(enabled, Ordering::Relaxed);
+        Ok(())
+    }
+
     fn configure_voice_ducking(
         &mut self,
         settings: VoiceDuckingSettings,
@@ -835,6 +852,41 @@ impl AudioBackend for NativeAudio {
             Ok(Some(MovieAudioClock::Playing {
                 position_ms: movie.sink.get_pos().as_millis().min(u128::from(u32::MAX)) as u32,
             }))
+        }
+    }
+}
+
+#[cfg(test)]
+mod output_gate_tests {
+    use super::*;
+
+    #[test]
+    fn muting_consumes_pcm_and_resuming_preserves_the_stream_position() {
+        let bytes = include_bytes!("../../../tests/fixtures/audio/mono440.ogg");
+        let gate = Arc::new(AtomicBool::new(true));
+        let mut source = StreamSource {
+            output_enabled: gate.clone(),
+            program: VorbisProgram::new(bytes.to_vec(), None, false).unwrap(),
+            compression: None,
+            fault: Arc::default(),
+            failed: false,
+        };
+        let mut reference = VorbisProgram::new(bytes.to_vec(), None, false).unwrap();
+        let mut samples = vec![];
+        while let Some(pcm) = reference.next_sample().unwrap() {
+            samples.push(pcm);
+        }
+        assert!(samples.len() > 3);
+        let muted = samples.len() / 3..samples.len() * 2 / 3;
+        for (index, pcm) in samples.into_iter().enumerate() {
+            let enabled = !muted.contains(&index);
+            gate.store(enabled, Ordering::Relaxed);
+            let expected = if enabled {
+                f32::from((pcm * 32768.0).clamp(-32768.0, 32767.0) as i16) / 32768.0
+            } else {
+                0.0
+            };
+            assert_eq!(source.next().unwrap(), expected);
         }
     }
 }

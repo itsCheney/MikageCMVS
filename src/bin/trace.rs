@@ -50,8 +50,8 @@ Saves and platform:
 
 Engine profile:
   --profile <id>               force a profile; needed for synthetic or unrecorded scripts
-  --allow-presumed             research only: run legacy presumed commands
-  --allow-unreviewed           research only: run unreviewed commands with base semantics
+  --block-presumed             stop at commands with only legacy presumed evidence
+  --block-unreviewed           stop at unreviewed commands
 
 Notes:
   - The profile is identified from the input, --script-archive and, with --record-platform,
@@ -124,15 +124,15 @@ fn run() -> Result<(), Box<dyn Error>> {
     let mut continue_without_snapshot = false;
     let mut random = None;
     let mut profile = None;
-    let mut allow_unreviewed = false;
-    let mut allow_presumed = false;
+    let mut block_unreviewed = false;
+    let mut block_presumed = false;
     while let Some(flag) = args.next() {
-        if flag == "--allow-presumed" {
-            allow_presumed = true;
+        if flag == "--block-presumed" {
+            block_presumed = true;
             continue;
         }
-        if flag == "--allow-unreviewed" {
-            allow_unreviewed = true;
+        if flag == "--block-unreviewed" {
+            block_unreviewed = true;
             continue;
         }
         if flag == "--bootstrap" {
@@ -205,10 +205,10 @@ fn run() -> Result<(), Box<dyn Error>> {
     let mut gate = TraceGate(CommandGate::new(
         Registry::builtin().select(profile.as_deref(), &evidence)?,
     ));
-    gate.set_allow_unreviewed(allow_unreviewed);
-    gate.set_allow_presumed(allow_presumed);
-    if allow_presumed {
-        println!("# research policy: legacy presumed commands allowed (--allow-presumed)");
+    gate.set_block_unreviewed(block_unreviewed);
+    gate.set_block_presumed(block_presumed);
+    if !block_presumed {
+        println!("# research policy: legacy presumed commands allowed (default policy)");
     }
     for line in gate.selection().log_lines() {
         println!("{line}");
@@ -320,6 +320,9 @@ fn run() -> Result<(), Box<dyn Error>> {
                 sequence.advance_frame(delta)?;
             }
             scene.advance_frame(delta);
+            if let Some(random) = random.as_mut() {
+                scene.advance_effect_pools(delta, random, &camera)?;
+            }
             camera.advance_frame(delta);
             movies.advance(delta);
             frame_delta = delta;
@@ -341,7 +344,7 @@ fn run() -> Result<(), Box<dyn Error>> {
             let resolved = gate.resolve(&machine, system_pc, command)?;
             if let Some(first) = resolved.first_unreviewed {
                 println!(
-                    "# UNREVIEWED system command 0x{:04x} allowed with {} (--allow-unreviewed, first use)",
+                    "# UNREVIEWED system command 0x{:04x} allowed with {} (default policy, first use)",
                     0x2000 + first,
                     cmvs_rs::dispatch::semantics_name(gate.selection().profile, first)
                 );
@@ -405,7 +408,6 @@ fn run() -> Result<(), Box<dyn Error>> {
                 gesture: platform_assets.is_some().then_some(&mut gesture),
                 popup: None,
                 save_title: platform_assets.is_some().then_some(&mut save_title),
-                effect_objects: platform_assets.is_some(),
                 ..Default::default()
             };
             if platform_assets.is_some() {
@@ -605,6 +607,9 @@ fn run() -> Result<(), Box<dyn Error>> {
                             sequence.advance_frame(delta)?;
                         }
                         scene.advance_frame(delta);
+                        if let Some(random) = random.as_mut() {
+                            scene.advance_effect_pools(delta, random, &camera)?;
+                        }
                         camera.advance_frame(delta);
                         movies.advance(delta);
                         frame_delta = delta;
@@ -632,6 +637,9 @@ fn run() -> Result<(), Box<dyn Error>> {
                     sequence.advance_frame(delta)?;
                 }
                 scene.advance_frame(delta);
+                if let Some(random) = random.as_mut() {
+                    scene.advance_effect_pools(delta, random, &camera)?;
+                }
                 camera.advance_frame(delta);
                 movies.advance(delta);
                 frame_delta = delta;
@@ -647,11 +655,16 @@ fn run() -> Result<(), Box<dyn Error>> {
             }
             if dispatched == Some(cmvs_rs::dispatch::Flow::Done) {
                 use cmvs_rs::dispatch::Capability;
-                let capability = cmvs_rs::dispatch::ROOT
-                    .iter()
-                    .find(|entry| entry.command == command)
-                    .expect("completed root command has an entry")
-                    .capability;
+                let entry = match resolved.semantics {
+                    cmvs_rs::profile::Semantics::Root => cmvs_rs::dispatch::ROOT
+                        .iter()
+                        .find(|entry| entry.command == command),
+                    cmvs_rs::profile::Semantics::Research(id) => {
+                        cmvs_rs::dispatch::research_entry(id, command)
+                    }
+                }
+                .expect("completed command has a selected entry");
+                let capability = entry.capability;
                 match capability {
                     Capability::TextState
                     | Capability::AuxiliaryScene
@@ -779,7 +792,7 @@ fn run() -> Result<(), Box<dyn Error>> {
                             machine.state().system_integer(0)
                         );
                     }
-                    Capability::Scene => {
+                    Capability::Scene | Capability::SceneRandom => {
                         println!(
                             "# scene state 0x{:04x}: {:?} rgba={:?} objects={:?}; recorded only, nothing drawn",
                             command + 0x2000,
@@ -962,8 +975,15 @@ fn run() -> Result<(), Box<dyn Error>> {
                         "# save title 0x2162 = {}; recorded only",
                         save_title.bytes().escape_ascii()
                     ),
+                    Capability::ParticleImages => {
+                        println!(
+                            "# particle pools={}; falling pools={}",
+                            scene.particle_effects().len(),
+                            scene.falling_effects().len()
+                        )
+                    }
                     Capability::EffectObjects => {
-                        println!("# effect object release 0x22a0: no +4024 object is modeled")
+                        println!("# effect object release 0x22a0: slot state updated")
                     }
                     Capability::Popup => println!(
                         "# popup menu 0x{:04x}: enabled={}; system_integer[0]={:?}; no native menu",

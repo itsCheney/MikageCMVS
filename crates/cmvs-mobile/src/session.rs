@@ -163,10 +163,9 @@ impl Session {
         let script: &'static _ = Box::leak(Box::new(start));
         let mut startup = Startup::new(script, &root, &selection.game, 0)?;
         startup.set_patch(patch);
-        if selection.lenient() {
-            startup.set_allow_presumed(true);
-            startup.set_allow_unreviewed(true);
-        }
+        // The gate runs presumed and unreviewed commands unless told to block them
+        // (upstream's --block-* research switches); a player never blocks, recorded
+        // game or not.
         let save_dir = config
             .save_dir
             .clone()

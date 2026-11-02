@@ -88,10 +88,10 @@ fn append(
             continue;
         }
         if byte == b'{' {
-            // Mikage: upstream stops on ruby in proportional mode (not yet compared with
-            // the original). The 天之圣杯 patch uses it, so the ruby is spread over the
-            // proportional base width the same way as for fixed cells.
             let group = parse_group(bytes, i + 1)?;
+            if proportional && group.base.iter().flatten().count() > 32 {
+                return Err("ruby base exceeds the original's 32 glyph positions");
+            }
             i = group.end;
             if wraps(text, 0, x, limit)? {
                 new_line(text, &mut line, &mut x, &mut y)?;
@@ -100,10 +100,14 @@ fn append(
                 }
             }
             let (start, ruby_y, group_delay) = (x, y.wrapping_sub(text.ruby_size as u32), delay);
+            let mut base_cells = Vec::new();
             for item in &group.base {
                 if let Some(code) = *item {
                     last = Some(push(text, code, [x, y], size, settings.outline)?);
                     let width = output_width(text, code, size, proportional, metrics)?;
+                    if proportional {
+                        base_cells.push((x, width));
+                    }
                     x = x.wrapping_add(width).wrapping_add(text.spacing[0] as u32);
                 }
                 delay = retime(text, last, delay, interval, instant, settings)?;
@@ -115,7 +119,30 @@ fn append(
             let count = group.ruby.iter().flatten().count() as u32;
             let width = x.wrapping_sub(start) << 10;
             let total = count.wrapping_mul(ruby_size) << 10;
-            let (mut ruby_x, step) = if total <= width {
+            let ruby_widths = if proportional {
+                group
+                    .ruby
+                    .iter()
+                    .flatten()
+                    .map(|&code| output_width(text, code, ruby_size, true, metrics))
+                    .collect::<Result<Vec<_>, _>>()?
+            } else {
+                Vec::new()
+            };
+            // 0x1400611f0: proportional ruby ignores extra ruby spacing. A run of
+            // middle dots matching the base count is centred on each base cell.
+            let dots = proportional
+                && base_cells.len() == ruby_widths.len()
+                && group.ruby.iter().flatten().all(|&code| code == 0x8145);
+            let (mut ruby_x, step) = if proportional {
+                let total = ruby_widths.iter().fold(0u32, |sum, &w| sum.wrapping_add(w));
+                (
+                    (start << 10)
+                        .wrapping_add(width >> 1)
+                        .wrapping_sub((total << 10) >> 1),
+                    0,
+                )
+            } else if total <= width {
                 let gap = (width - total).checked_div(count.wrapping_mul(2)).ok_or(
                     "ruby annotation without double-byte characters divides by zero in the original",
                 )?;
@@ -131,16 +158,30 @@ fn append(
                 )
             };
             let mut ruby_delay = group_delay;
+            let mut ruby_index = 0;
             for item in &group.ruby {
                 if let Some(code) = *item {
+                    let glyph_x = if dots {
+                        let (base_x, base_width) = base_cells[ruby_index];
+                        base_x
+                            .wrapping_add(base_width >> 1)
+                            .wrapping_sub(ruby_widths[ruby_index] >> 1)
+                    } else {
+                        ruby_x >> 10
+                    };
                     last = Some(push(
                         text,
                         code,
-                        [ruby_x >> 10, ruby_y],
+                        [glyph_x, ruby_y],
                         ruby_size,
                         settings.outline,
                     )?);
-                    ruby_x = ruby_x.wrapping_add(step);
+                    ruby_x = ruby_x.wrapping_add(if proportional {
+                        ruby_widths[ruby_index] << 10
+                    } else {
+                        step
+                    });
+                    ruby_index += 1;
                 }
                 ruby_delay = retime(text, last, ruby_delay, interval, instant, settings)?;
             }
@@ -413,12 +454,39 @@ pub(super) fn measure_pixels(
     ))
 }
 impl AuxiliaryText {
-    fn float_font_cells(&self, at: u16) -> f32 {
+    pub(super) fn float_font_cells(&self, at: u16) -> f32 {
         f32::from_bits(self.word(at).expect("modeled field"))
     }
     fn at_edge_font_cells(&self, x: f32) -> bool {
         x >= (self.float_font_cells(16) + self.float_font_cells(24))
             - (self.word(48).unwrap() as i32 as f32 + self.float_font_cells(52))
+    }
+    // 0x1400321a0, a2=0. JB/JNB at +0x98/+0xb1 compare the counters unsigned.
+    pub(super) fn wraps_font_cells(
+        &self,
+        x: f32,
+        code: u16,
+        simple: bool,
+        scratch: &mut [u32; 2],
+    ) -> Result<bool, &'static str> {
+        let no_break = self.word(128).expect("modeled field") != 0;
+        let Some(rules) = &self.line_break else {
+            return Ok(
+                self.at_edge_font_cells(x) && (simple || !(no_break && crate::encoding::no_break(code)))
+            );
+        };
+        if !self.at_edge_font_cells(x) {
+            scratch[1] = u32::from(code);
+            return Ok(false);
+        }
+        if !simple && no_break {
+            let kind = super::measure::line_break_kind(rules, code)?;
+            if kind == 1 || (kind == 2 && scratch[1] == u32::from(code)) {
+                scratch[0] = scratch[0].wrapping_add(1);
+                return Ok((rules.max_overflow as u32) < scratch[0]);
+            }
+        }
+        Ok(true)
     }
     pub(super) fn layout_font_cells(
         &self,
@@ -435,7 +503,11 @@ impl AuxiliaryText {
                     .ok_or("proportional text requires a font metrics backend")?
                     .advance_width(&self.face, code, size, false)? as f32)
             } else {
-                Ok(size_f)
+                Ok(if !(128..0xff80).contains(&code) {
+                    size_f * 0.5
+                } else {
+                    size_f
+                })
             }
         };
         let gradient = match self.word(148).expect("modeled field") {
@@ -459,12 +531,16 @@ impl AuxiliaryText {
             cell: 0,
             layer: 0,
         };
-        let no_break = self.word(128).expect("modeled field") != 0;
         let (mut x, mut y) = (self.float_font_cells(176), self.float_font_cells(180));
+        let mut scratch = [0; 2];
         let mut line = 0u32;
         let mut glyphs = Vec::new();
         // 0x14002f581 / 0x14002f6c9 / 0x14002f877: a line feed after the wrap test.
-        let wrap = |x: &mut f32, y: &mut f32, line: &mut u32| -> Result<(), &'static str> {
+        let wrap = |x: &mut f32,
+                    y: &mut f32,
+                    line: &mut u32,
+                    scratch: &mut [u32; 2]|
+         -> Result<(), &'static str> {
             *line += 1;
             if *line >= 32 {
                 return Err("auxiliary text exceeds the 32 cleared ruby-line flags");
@@ -474,6 +550,7 @@ impl AuxiliaryText {
             }
             *x = self.float_font_cells(16);
             *y += size_f + self.float_font_cells(56);
+            *scratch = [0; 2];
             Ok(())
         };
         let truncate = |v: f32| {
@@ -487,12 +564,31 @@ impl AuxiliaryText {
         while byte(i) != 0 {
             let first = byte(i);
             if first == b'\\' {
+                if matches!(byte(i + 1), b'"' | b'%' | b'@' | b'{' | b'}') {
+                    let code = u16::from(if byte(i + 1) == b'@' {
+                        b'\\'
+                    } else {
+                        byte(i + 1)
+                    });
+                    if self.wraps_font_cells(x, code, true, &mut scratch)? {
+                        wrap(&mut x, &mut y, &mut line, &mut scratch)?;
+                    }
+                    glyphs.push(AuxiliaryGlyph {
+                        code,
+                        position: [truncate(x), truncate(y)],
+                        ..template.clone()
+                    });
+                    x += width(code)? + self.float_font_cells(52);
+                    i += 2;
+                    continue;
+                }
                 match byte(i + 1) {
                     b'c' | b't' => i += 2,
                     b'n' => {
                         // Raw +16 copy; neither the line counter nor the ruby height moves.
                         x = self.float_font_cells(16);
                         y += size_f + self.float_font_cells(56);
+                        scratch = [0; 2];
                         i += 2;
                     }
                     b'w' => i += 3,
@@ -506,8 +602,8 @@ impl AuxiliaryText {
             if first == b'{' {
                 // The newer proportional path wraps the group as a whole, unlike
                 // the root build's per-character auxiliary ruby-base layout.
-                if proportional && self.at_edge_font_cells(x) {
-                    wrap(&mut x, &mut y, &mut line)?;
+                if proportional && self.wraps_font_cells(x, 0, true, &mut scratch)? {
+                    wrap(&mut x, &mut y, &mut line, &mut scratch)?;
                 }
                 i += 1;
                 loop {
@@ -518,11 +614,8 @@ impl AuxiliaryText {
                     if lead(b) {
                         let code = u16::from_be_bytes([b, byte(i + 1)]);
                         i += 2;
-                        if !proportional
-                            && self.at_edge_font_cells(x)
-                            && !(no_break && crate::encoding::no_break(code))
-                        {
-                            wrap(&mut x, &mut y, &mut line)?;
+                        if !proportional && self.wraps_font_cells(x, code, false, &mut scratch)? {
+                            wrap(&mut x, &mut y, &mut line, &mut scratch)?;
                         }
                         glyphs.push(AuxiliaryGlyph {
                             code,
@@ -554,27 +647,23 @@ impl AuxiliaryText {
                 continue;
             }
             if !lead(first) {
-                if proportional {
-                    if self.at_edge_font_cells(x) {
-                        wrap(&mut x, &mut y, &mut line)?;
-                    }
-                    let code = first as i8 as i16 as u16;
-                    glyphs.push(AuxiliaryGlyph {
-                        code,
-                        position: [truncate(x), truncate(y)],
-                        ..template.clone()
-                    });
-                    x += width(code)? + self.float_font_cells(52);
-                    i += 1;
-                    continue;
+                if self.wraps_font_cells(x, first as i8 as i16 as u16, true, &mut scratch)? {
+                    wrap(&mut x, &mut y, &mut line, &mut scratch)?;
                 }
-                // 0x14002f7a2 compares with a word the caller never stored (r8's home slot).
-                return Err("half-width auxiliary text advance reads an uninitialized stack word");
+                let code = first as i8 as i16 as u16;
+                glyphs.push(AuxiliaryGlyph {
+                    code,
+                    position: [truncate(x), truncate(y)],
+                    ..template.clone()
+                });
+                x += width(code)? + self.float_font_cells(52);
+                i += 1;
+                continue;
             }
             let code = u16::from_be_bytes([first, byte(i + 1)]);
             i += 2;
-            if self.at_edge_font_cells(x) && !(no_break && crate::encoding::no_break(code)) {
-                wrap(&mut x, &mut y, &mut line)?;
+            if self.wraps_font_cells(x, code, false, &mut scratch)? {
+                wrap(&mut x, &mut y, &mut line, &mut scratch)?;
             }
             let mut position = [truncate(x), truncate(y)];
             if code == crate::encoding::voiced_mark() {
@@ -592,6 +681,7 @@ impl AuxiliaryText {
         Ok(TextLayout {
             glyphs,
             pen: [x, y],
+            line_break_scratch: self.line_break.as_ref().map(|_| scratch),
         })
     }
 }
@@ -752,5 +842,81 @@ pub(crate) fn auxiliary_text(
         .as_mut()
         .expect("validated group")
         .append(layout);
+    Ok(Flow::Done)
+}
+
+/// 0x23b8 / 0x14007aa10 -> 0x140032050. These two native fields hold 64 bytes each.
+pub(crate) fn auxiliary_line_break(
+    hosts: &mut TextHosts<'_>,
+    call: &mut Call<'_, '_>,
+) -> Result<Flow, DecodeError> {
+    let slot = call.argument(4, "auxiliary slot")? as usize;
+    let hanging = call.argument(8, "hanging characters")?;
+    let inseparable = call.argument(12, "inseparable characters")?;
+    let max_overflow = call.argument(16, "maximum overflow")? as i32;
+    let resolve = |raw| -> Result<Vec<u8>, DecodeError> {
+        let bytes = call.vm.resolve_string(raw)?;
+        let bytes = bytes.split(|&b| b == 0).next().unwrap_or_default();
+        if bytes.len() >= 64 || bytes.len() % 2 != 0 {
+            return Err(
+                call.error("auxiliary line-break set exceeds 63 bytes or has an odd length")
+            );
+        }
+        Ok(bytes.to_vec())
+    };
+    let rules = super::LineBreakRules {
+        max_overflow,
+        hanging: resolve(hanging)?,
+        inseparable: resolve(inseparable)?,
+    };
+    let host = &mut hosts.messages;
+    if host
+        .auxiliary_texts
+        .get(slot)
+        .and_then(Option::as_ref)
+        .is_none()
+    {
+        return Err(call.error("auxiliary text group does not exist or outside 0..7"));
+    }
+    call.complete(0x4010)?;
+    let group = host.auxiliary_texts[slot].as_mut().expect("validated");
+    group.line_break = Some(rules);
+    group.line_break_scratch = [0; 2];
+    Ok(Flow::Done)
+}
+
+pub(crate) fn auxiliary_measure(
+    hosts: &mut TextHosts<'_>,
+    call: &mut Call<'_, '_>,
+) -> Result<Flow, DecodeError> {
+    let slot = call.argument(4, "auxiliary slot")? as usize;
+    let raw = call.argument(8, "text")?;
+    let bytes = call.vm.resolve_string(raw)?;
+    let host = &mut hosts.messages;
+    let group = host
+        .auxiliary_texts
+        .get(slot)
+        .and_then(Option::as_ref)
+        .ok_or_else(|| call.error("auxiliary text group does not exist or outside 0..7"))?;
+    let (counts, scratch) = group
+        .measure_font_cells(
+            &bytes,
+            call.command == 0x3bb,
+            host.font_cells.proportional,
+            host.glyph_metrics.as_deref(),
+        )
+        .map_err(|why| call.error(why))?;
+    call.complete(0x4008)?;
+    let group = host.auxiliary_texts[slot].as_mut().expect("validated");
+    group.line_break_scratch = scratch;
+    for at in (212..340).step_by(4) {
+        group.words.insert(at, 0);
+    }
+    for (slot, value) in [(0, 1), (1, counts[0]), (2, counts[1]), (4, counts[2])] {
+        call.vm
+            .state_mut()
+            .set_system_integer(slot, value)
+            .expect("known result slot");
+    }
     Ok(Flow::Done)
 }

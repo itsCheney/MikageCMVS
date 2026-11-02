@@ -1,4 +1,4 @@
-//! Shared static system-command routing and sparse text research overrides.
+//! Shared static system-command routing and sparse identity-bound research overrides.
 //! Gate resolution precedes dispatch. Runtime-wide operations return a checked
 //! request for the caller's orchestration; they remain pending until acknowledged.
 //! A selected override never falls through to root semantics.
@@ -302,7 +302,6 @@ pub struct Hosts<'a> {
     pub save_title: Option<&'a mut SaveTitle>,
     pub save_info: Option<&'a mut SaveInfo>,
     pub effects: Option<&'a mut bool>,
-    pub effect_objects: bool,
     /// Availability of stateless services in this host environment.
     pub strings: bool,
     pub math: bool,
@@ -361,6 +360,8 @@ pub enum Capability {
     SaveInfo,
     Effects,
     EffectObjects,
+    ParticleImages,
+    SceneRandom,
     FadeWait,
     MaskWait,
     QuakeWait,
@@ -433,7 +434,9 @@ impl Hosts<'_> {
             Capability::SaveTitle => self.save_title.is_some(),
             Capability::SaveInfo => self.save_info.is_some(),
             Capability::Effects => self.effects.is_some(),
-            Capability::EffectObjects => self.effect_objects,
+            Capability::EffectObjects => self.scene.is_some(),
+            Capability::ParticleImages => self.images.is_some() && self.random.is_some(),
+            Capability::SceneRandom => self.scene.is_some() && self.random.is_some(),
             Capability::FadeWait
             | Capability::MaskWait
             | Capability::QuakeWait
@@ -716,10 +719,14 @@ fn root_effects(hosts: &mut Hosts<'_>, call: &mut Call<'_, '_>) -> Result<Flow, 
 }
 
 fn root_effect_objects(
-    _hosts: &mut Hosts<'_>,
+    hosts: &mut Hosts<'_>,
     call: &mut Call<'_, '_>,
 ) -> Result<Flow, Box<dyn Error>> {
-    crate::effect_objects::handle(call)?;
+    hosts
+        .scene
+        .as_deref_mut()
+        .expect("effect objects capability checked")
+        .release_effect(call)?;
     Ok(Flow::Done)
 }
 
@@ -1373,13 +1380,18 @@ fn root_change_image(
 }
 
 pub fn uses_images(command: u16) -> bool {
-    ROOT.iter().any(|e| {
-        e.command == command
-            && matches!(
-                e.capability,
-                Capability::SceneImages | Capability::MaskImages | Capability::ImageChange
-            )
-    })
+    ROOT.iter()
+        .chain(RESEARCH_TABLES.iter().flat_map(|table| table.iter()))
+        .any(|e| {
+            e.command == command
+                && matches!(
+                    e.capability,
+                    Capability::SceneImages
+                        | Capability::MaskImages
+                        | Capability::ImageChange
+                        | Capability::ParticleImages
+                )
+        })
 }
 
 pub fn is_wait(command: u16) -> bool {
@@ -2235,19 +2247,6 @@ pub static ROOT: &[Entry] = &[
     Entry {
         command: 0x3a0,
         name: "stop auxiliary motion",
-        capability: Capability::TextState,
-        handler: root_text_state,
-    },
-    // Mikage: 2017 builds (アオイトリ 2017-11-29), outside upstream's evidence.
-    Entry {
-        command: 0x3b8,
-        name: "auxiliary line-break rules",
-        capability: Capability::TextState,
-        handler: root_text_state,
-    },
-    Entry {
-        command: 0x3bb,
-        name: "auxiliary pixel measurement",
         capability: Capability::TextState,
         handler: root_text_state,
     },
@@ -3829,13 +3828,6 @@ pub static ROOT: &[Entry] = &[
         capability: Capability::Audio,
         handler: root_audio,
     },
-    // Mikage: 2017 builds (アオイトリ 2017-11-29), outside upstream's evidence.
-    Entry {
-        command: 0x2ed,
-        name: "background sound",
-        capability: Capability::Audio,
-        handler: root_audio,
-    },
     Entry {
         command: 0x2d6,
         name: "audio settings",
@@ -4457,18 +4449,207 @@ pub static FONT_CELLS: &[Entry] = &[
             )?)
         },
     },
+    Entry {
+        command: 0x3b8,
+        name: "auxiliary line-break rules",
+        capability: Capability::Text,
+        handler: |hosts, call| {
+            Ok(font_cells::auxiliary_line_break(
+                hosts.text.as_mut().expect("text capability checked"),
+                call,
+            )?)
+        },
+    },
+    Entry {
+        command: 0x3b9,
+        name: "auxiliary byte measurement",
+        capability: Capability::Text,
+        handler: auxiliary_measure,
+    },
+    Entry {
+        command: 0x3bb,
+        name: "auxiliary pixel measurement",
+        capability: Capability::Text,
+        handler: auxiliary_measure,
+    },
 ];
 
+fn auxiliary_measure(
+    hosts: &mut Hosts<'_>,
+    call: &mut Call<'_, '_>,
+) -> Result<Flow, Box<dyn Error>> {
+    Ok(font_cells::auxiliary_measure(
+        hosts.text.as_mut().expect("text capability checked"),
+        call,
+    )?)
+}
+
+pub static PARTICLES: &[Entry] = &[Entry {
+    command: 0x2a5,
+    name: "create particle effect",
+    capability: Capability::ParticleImages,
+    handler: |hosts, call| {
+        let h = hosts
+            .images
+            .as_mut()
+            .expect("particle image capability checked");
+        h.scene.create_particles(
+            call,
+            h.source,
+            hosts
+                .random
+                .as_deref_mut()
+                .expect("particle random capability checked"),
+        )?;
+        Ok(Flow::Done)
+    },
+}];
+
+pub static FALLING_BILLBOARDS: &[Entry] = &[Entry {
+    command: 0x2a2,
+    name: "create falling billboard effect",
+    capability: Capability::ParticleImages,
+    handler: |hosts, call| {
+        let h = hosts
+            .images
+            .as_mut()
+            .expect("particle image capability checked");
+        h.scene.create_falling_effect(
+            call,
+            h.source,
+            hosts
+                .random
+                .as_deref_mut()
+                .expect("particle random capability checked"),
+        )?;
+        Ok(Flow::Done)
+    },
+}];
+
+pub static FRAGMENTS: &[Entry] = &[Entry {
+    command: 0x2a8,
+    name: "create image fragment effect",
+    capability: Capability::SceneRandom,
+    handler: |hosts, call| {
+        hosts
+            .scene
+            .as_deref_mut()
+            .expect("scene random capability checked")
+            .create_fragments(
+                call,
+                hosts
+                    .random
+                    .as_deref_mut()
+                    .expect("scene random capability checked"),
+            )?;
+        Ok(Flow::Done)
+    },
+}];
+
+pub static COLLISION_PARTICLES: &[Entry] = &[
+    Entry {
+        command: 0x2a6,
+        name: "create collision particle effect",
+        capability: Capability::ParticleImages,
+        handler: |hosts, call| {
+            let h = hosts
+                .images
+                .as_mut()
+                .expect("particle image capability checked");
+            h.scene.create_collision_effect(
+                call,
+                h.source,
+                hosts
+                    .random
+                    .as_deref_mut()
+                    .expect("particle random capability checked"),
+            )?;
+            Ok(Flow::Done)
+        },
+    },
+    Entry {
+        command: 0x330,
+        name: "create collision mesh",
+        capability: Capability::Scene,
+        handler: collision_mesh,
+    },
+    Entry {
+        command: 0x331,
+        name: "release collision mesh",
+        capability: Capability::Scene,
+        handler: collision_mesh,
+    },
+    Entry {
+        command: 0x332,
+        name: "append collision vertex",
+        capability: Capability::Scene,
+        handler: collision_mesh,
+    },
+];
+fn collision_mesh(hosts: &mut Hosts<'_>, call: &mut Call<'_, '_>) -> Result<Flow, Box<dyn Error>> {
+    hosts
+        .scene
+        .as_deref_mut()
+        .expect("scene capability checked")
+        .handle_collision_mesh(call)?;
+    Ok(Flow::Done)
+}
+
+pub static BACKGROUND_AUDIO: &[Entry] = &[Entry {
+    command: 0x2ed,
+    name: "background audio output",
+    capability: Capability::Audio,
+    handler: |hosts, call| {
+        let h = hosts.audio.as_mut().expect("audio capability checked");
+        h.audio.handle_background_output(call, h.backend)?;
+        Ok(Flow::Done)
+    },
+}];
+
+/// Static research tables used when provisioning shared host capabilities.
+pub static RESEARCH_TABLES: &[&[Entry]] = &[
+    FONT_CELLS,
+    PARTICLES,
+    BACKGROUND_AUDIO,
+    FALLING_BILLBOARDS,
+    COLLISION_PARTICLES,
+    FRAGMENTS,
+];
+
+pub fn research_entry(id: crate::profile::ResearchId, command: u16) -> Option<&'static Entry> {
+    let entries = match id {
+        crate::profile::ResearchId::FontCells => FONT_CELLS,
+        crate::profile::ResearchId::Particles => PARTICLES,
+        crate::profile::ResearchId::BackgroundAudio => BACKGROUND_AUDIO,
+        crate::profile::ResearchId::FallingBillboards => FALLING_BILLBOARDS,
+        crate::profile::ResearchId::CollisionParticles => COLLISION_PARTICLES,
+        crate::profile::ResearchId::Fragments => FRAGMENTS,
+    };
+    entries.iter().find(|entry| entry.command == command)
+}
+
 pub fn semantics_name(profile: &EngineProfile, command: u16) -> &'static str {
-    if profile.semantics(command) == Semantics::ResearchFontCells {
-        "research text override"
-    } else {
-        "base semantics"
+    match profile.semantics(command) {
+        Semantics::Research(crate::profile::ResearchId::FontCells) => "research text override",
+        Semantics::Research(crate::profile::ResearchId::Particles) => "research particle override",
+        Semantics::Research(crate::profile::ResearchId::BackgroundAudio) => {
+            "research background audio override"
+        }
+        Semantics::Research(crate::profile::ResearchId::FallingBillboards) => {
+            "research falling billboard override"
+        }
+        Semantics::Research(crate::profile::ResearchId::CollisionParticles) => {
+            "research collision particle override"
+        }
+        Semantics::Research(crate::profile::ResearchId::Fragments) => {
+            "research image fragment override"
+        }
+        Semantics::Root => "base semantics",
     }
 }
 
-/// Called after CommandGate::resolve. None delegates an unmigrated command to the
-/// legacy chain. Unavailable preserves the pending command and arguments; the
+/// Called after CommandGate::resolve. None means no pending command or no root
+/// entry. Unavailable preserves the pending command and arguments; the
 /// caller may report the missing capability, but must not try another handler.
 pub fn run(
     semantics: Semantics,
@@ -4478,17 +4659,9 @@ pub fn run(
     let Some((pc, command)) = vm.pending_system() else {
         return Ok(None);
     };
-    let specific = if semantics == Semantics::ResearchFontCells {
-        FONT_CELLS
-    } else {
-        &[]
-    }
-    .iter()
-    .find(|e| e.command == command);
-    let entry = if semantics == Semantics::ResearchFontCells {
-        specific
-    } else {
-        ROOT.iter().find(|e| e.command == command)
+    let entry = match semantics {
+        Semantics::Research(id) => research_entry(id, command),
+        Semantics::Root => ROOT.iter().find(|e| e.command == command),
     };
     let Some(entry) = entry else {
         return Ok((semantics != Semantics::Root).then_some(Flow::Unhandled));

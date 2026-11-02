@@ -36,8 +36,10 @@ pub struct Options {
     pub route_skip: bool,
     /// Route branches start from a saved checkpoint instead of replaying from the start.
     pub fork_saves: bool,
-    pub allow_presumed: bool,
-    pub allow_unreviewed: bool,
+    /// Explicit research mode: keep snapshot commands' live effects but no save image.
+    pub capture_snapshots: bool,
+    pub block_presumed: bool,
+    pub block_unreviewed: bool,
 }
 
 impl Default for Options {
@@ -51,9 +53,10 @@ impl Default for Options {
             max_rounds: 4,
             route_skip: true,
             fork_saves: false,
+            capture_snapshots: true,
 
-            allow_presumed: false,
-            allow_unreviewed: false,
+            block_presumed: false,
+            block_unreviewed: false,
         }
     }
 }
@@ -69,8 +72,9 @@ impl Options {
             ("max_rounds", self.max_rounds.into()),
             ("route_skip", self.route_skip.into()),
             ("fork_saves", self.fork_saves.into()),
-            ("allow_presumed", self.allow_presumed.into()),
-            ("allow_unreviewed", self.allow_unreviewed.into()),
+            ("capture_snapshots", self.capture_snapshots.into()),
+            ("block_presumed", self.block_presumed.into()),
+            ("block_unreviewed", self.block_unreviewed.into()),
         ])
     }
 }
@@ -181,15 +185,15 @@ impl<'a> Session<'a> {
         if let Some(patch) = &target.patch {
             run.set_patch(Some(patch.clone()));
         }
-        run.set_allow_presumed(options.allow_presumed);
-        run.set_allow_unreviewed(options.allow_unreviewed);
+        run.set_block_presumed(options.block_presumed);
+        run.set_block_unreviewed(options.block_unreviewed);
         run.set_user_data_directory(user)
             .map_err(|e| e.to_string())?;
         // Data-driven: only records that verify the policy enable it.
         if target.has(cap::AUTO_RESUME_POLICY) {
             run.set_skip_auto_resume(true)?;
         }
-        if !target.has(cap::SNAPSHOT_LAYOUT) {
+        if !options.capture_snapshots || !target.has(cap::SNAPSHOT_LAYOUT) {
             // Capability, not a game branch: the live-state effect still applies.
             run.set_snapshot_policy(SnapshotPolicy::ContinueWithoutImage);
         }
@@ -212,7 +216,9 @@ impl<'a> Session<'a> {
             max_steps: options.max_steps,
             route_skip: options.route_skip,
             // Forking needs gameplay saves, which need the snapshot layout.
-            fork_saves: options.fork_saves && target.has(cap::SNAPSHOT_LAYOUT),
+            fork_saves: options.fork_saves
+                && options.capture_snapshots
+                && target.has(cap::SNAPSHOT_LAYOUT),
 
             queue: VecDeque::new(),
             pointer: crate::device::OFF_SCREEN,
@@ -302,10 +308,11 @@ impl<'a> Session<'a> {
     /// Player-facing settings: text, auto advance, read skip and audio mixer values.
     pub fn settings_fingerprint(&self) -> String {
         format!(
-            "{:?} {:?} {:?}",
+            "{:?} {:?} {:?} background_output: {}",
             self.run.settings(),
             self.run.audio().settings(),
-            self.run.audio().voice_ducking()
+            self.run.audio().voice_ducking(),
+            self.run.audio().background_output()
         )
     }
     /// Live resource counts that a long run should not grow without bound.

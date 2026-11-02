@@ -1,6 +1,6 @@
 # 文档导航
 
-项目能力概览见[项目首页](../README.md)。这里按用途组织文档；具体游戏的兼容性以对应游戏档案为准。
+项目介绍见[项目首页](../README.md)，能力与验证范围见[当前状态](status.md)。这里按用途组织文档；具体游戏的兼容性以对应游戏档案为准。
 
 ## 使用与开发
 
@@ -8,6 +8,7 @@
 |---|---|
 | [运行指南](guides/running.md) | 桌面预览、字体、音频、系统存档与显式运行策略 |
 | [CLI 指南](guides/cli.md) | 脚本、归档、图像、影片与存档检查工具 |
+| [分派开发指南](guides/dispatch.md) | 系统命令调用路径、处理器约定与验证入口 |
 | [架构](architecture.md) | 平台无关核心、后端契约、运行编排与错误策略 |
 | [Workspace](workspace.md) | crate 划分、feature 与检查命令 |
 | [研究约定](research.md) | 证据绑定、真实样本验证与新游戏接入 |
@@ -34,7 +35,7 @@
 
 ## 游戏测试与证据
 
-[游戏测试目录](games/README.md)汇总各款游戏与版本：[《アマツツミ》](games/amatsutsumi/README.md)是主线，[《クロノクロック》](games/chronoclock/README.md)已开始逐条语义研究。其目录保存二进制身份、VM 语义证据、研究记录、审计报告和开发历史。
+[游戏档案目录](games/README.md)已登记 19 款 CMVS 样本，包含 16 款基础档案与 3 款已有研究的游戏：[《アマツツミ》](games/amatsutsumi/README.md)是主线，[《クロノクロック》](games/chronoclock/README.md)已开始逐条语义研究。其目录保存二进制身份、VM 语义证据、研究记录、审计报告和开发历史。
 
 《アマツツミ》审计后续命令实现状态见[21 条指令推进表](games/amatsutsumi/semantics-progress.md)。
 

@@ -5,7 +5,7 @@
 ## 桌面预览
 
 ```bash
-cargo run --offline --release --features desktop --bin cmvs-desktop -- "E:/Download/AMATSUTSUMI" --encoding shift-jis --user-data-dir "local/amatsutsumi/user-data" --audio record --font "C:/Windows/Fonts/msgothic.ttc"
+cargo run --offline --release --features desktop --bin cmvs-desktop -- "<游戏目录>" --encoding shift-jis --user-data-dir "local/amatsutsumi/user-data" --audio record --font "C:/Windows/Fonts/msgothic.ttc"
 ```
 
 默认在 0x2080/0x22b2 构建引擎存档快照；存档、读档与系统存档都写入 `--user-data-dir`，原游戏目录保持只读。快照点上存在尚无存档格式的状态时以错误停止，不写不完整镜像，范围见[剧情存档](#剧情存档)。
@@ -31,7 +31,7 @@ cargo run --offline --release --features desktop --bin cmvs-desktop -- "E:/Downl
 已验证的《クロノクロック》PC样本可用以下参数启动原生软件绘制窗口及音频。它仍依赖两项显式研究放行，不能省略或视为全部命令已复核；样本身份与验证范围见[游戏档案](../games/chronoclock/README.md)。
 
 ```bash
-cargo run --offline --release --features desktop,audio-output --bin cmvs-desktop -- "E:/Download/Purple Software/2015-04-24_CHRONOCLOCK" --encoding shift-jis --user-data-dir "local/chronoclock/play-user" --audio native --font "C:/Windows/Fonts/msgothic.ttc" --allow-presumed --allow-unreviewed
+cargo run --offline --release --features desktop,audio-output --bin cmvs-desktop -- "<游戏目录>" --encoding shift-jis --user-data-dir "local/chronoclock/play-user" --audio native --font "C:/Windows/Fonts/msgothic.ttc" --allow-presumed --allow-unreviewed
 ```
 
 使用独立用户目录保留本次进度。正常剧情支持本作文字v2快照，可从工具栏打开存读档；无需使用会禁用剧情存档的 `--continue-without-snapshot`。原生窗口已验证空槽保存、关闭、重启恢复及设置持久化；覆盖范围之外的特殊图像、活动场景效果快照仍显式拒绝。鉴赏缩略图列表由脚本禁止键盘导航，使用鼠标；侧栏导航和剧情键盘输入另有验证，不能据此声称整个鉴赏页支持纯键盘。
@@ -39,7 +39,7 @@ cargo run --offline --release --features desktop,audio-output --bin cmvs-desktop
 ## 原生音频
 
 ```bash
-cargo run --offline --release --features desktop,audio-output --bin cmvs-desktop -- "E:/Download/AMATSUTSUMI" --encoding shift-jis --user-data-dir "local/amatsutsumi/user-data" --audio native --font "C:/Windows/Fonts/msgothic.ttc"
+cargo run --offline --release --features desktop,audio-output --bin cmvs-desktop -- "<游戏目录>" --encoding shift-jis --user-data-dir "local/amatsutsumi/user-data" --audio native --font "C:/Windows/Fonts/msgothic.ttc"
 ```
 
 普通 Windows 桌面权限下已验证品牌音效和标题 BGM；受限沙箱中相同构建曾以 `0xc0000008` 退出。设备检查、源消费时钟与验证边界见[原生音频](../backends/audio-output.md)。其他平台和完整剧情音轨仍需独立实测。
@@ -69,7 +69,7 @@ cargo run --offline --release --features desktop,audio-output --bin cmvs-desktop
 
 提供 `--user-data-dir` 时，优先读取该目录的 `cmvs.cfg`；首次没有用户配置时，从原游戏的只读配置开始。桌面正常退出（含诊断倒计时退出）保存当前已实现的设置，生成或替换用户 `cmvs.cfg`，旧配置留在 `cmvs.cfg.bak`。VM错误退出不自动保存。没有独立用户目录或使用单次 `--system-save-output` 时不写配置。无窗口库调用方需显式调用 `Startup::save_preferences`，Drop不执行可能失败的保存。
 
-目前保存音量与声音开关、语音压低BGM、文字速度/描边/粗体/显现、语音停止方式、未读停止、自动送页、后台运行、画面效果、保存/读取确认及光标自动隐藏。原配置中的未知键、其他设置和原始文本字节保留。全屏与比例偏好使用 `[CMVS_RS_DESKTOP]` 的 FULLSCREEN/ASPECT_MODE/ASPECT_SCALING，适配当前单显示器无边框全屏；不改原版D3D适配器配置。系统页绘制模式沿用原版 `[GRAPHIC_CONFIG]` 的 ASPECT_RATIO_FILTER（0为线性、1为点采样），桌面按此选择软件双线性或最近邻缩放。`--font` 文件作为内置缺省面ＭＳ ゴシック；游戏内「フォント選択」在Windows上打开系统字体对话框，在Linux上打开Zenity日文字体族列表，所选面写入 `[MESSAGE_INFO]` 的 FONT 并从系统字体目录载入，启动时找不到配置面则换回缺省。Linux需要安装fontconfig、zenity与日文字体；其他平台的字体对话框尚未实现。
+目前保存音量与声音开关、语音压低BGM、文字速度/描边/粗体/显现、语音停止方式、未读停止、自动送页、后台运行、画面效果、保存/读取确认及光标自动隐藏。原配置中的未知键、其他设置和原始文本字节保留。全屏与比例偏好使用 `[CMVS_RS_DESKTOP]` 的 FULLSCREEN/ASPECT_MODE/ASPECT_SCALING，适配当前单显示器无边框全屏；不改原版D3D适配器配置。系统页绘制模式沿用原版 `[GRAPHIC_CONFIG]` 的 ASPECT_RATIO_FILTER（0为线性、1为点采样），桌面按此选择软件双线性或最近邻缩放。`--font` 文件作为内置缺省面ＭＳ ゴシック；游戏内「フォント選択」在Windows上打开系统字体对话框，在Linux上打开Zenity日文字体族列表，所选面写入 `[MESSAGE_INFO]` 的 FONT 并从系统字体目录载入，启动时找不到配置面则换回缺省。Linux需要安装fontconfig、zenity与日文字体；macOS 使用系统独立字体族选择窗口；其他平台的字体对话框尚未实现。
 
 已载入CSS1模板时，正常退出也保存持久变量，包含游戏脚本管理的背景动画和窗口透明度；尚未载入模板时只保存INI，不生成猜测的system.dat。各文件单独使用临时文件替换及备份，共用用户目录会话锁；INI与CSS1不是跨文件事务，后一步失败可能已有前一步保存成功。CSS1损坏、配置超限/含NUL，或缺少主文件而有备份时明确报错，需自行恢复，不静默覆盖。配置限制1MiB，拒绝NUL/UTF-16文件。
 
@@ -82,3 +82,16 @@ cargo run --offline --release --features desktop,audio-output --bin cmvs-desktop
 ## 选择图形后端
 
 桌面默认 `--renderer cpu`。使用 `--features wgpu-renderer` 构建后可显式传入 `--renderer wgpu`，在 GPU 上执行场景合成、影片缩放和窗口呈现；初始化失败明确报错。CPU-only 构建保留原有运行方式。截图、依赖、限制与检查命令见 [wgpu 后端](../backends/wgpu.md)。
+
+## macOS
+
+安装 Rust stable 与 Xcode Command Line Tools（`xcode-select --install`）。Apple Silicon 与 Intel 均使用本机默认 Rust target；首次构建需要联网获取依赖。
+
+```bash
+cargo build --release --features desktop,audio-output --bin cmvs-desktop
+cargo run --release --features desktop,audio-output --bin cmvs-desktop -- "/path/to/game" --encoding shift-jis --user-data-dir "$HOME/Library/Application Support/cmvs-rs/game" --audio native --font "/path/to/JapaneseFont.ttf"
+```
+
+请提供实际安装且覆盖游戏日文的 OpenType 字体路径；TTC 可用 `--font-face` 选择索引。游戏内字体选择使用系统自带 osascript/AppKit，取消保留当前设置；选择窗口独立显示，期间 VM 暂停。字体发现包含 `/System/Library/Fonts`、其 `Supplemental` 子目录、`/Library/Fonts` 和 `~/Library/Fonts`。宿主仍会验证选中字体能否由 OpenType 后端载入，不支持的系统字体格式不能用于显示。
+
+GPU 路径可用 `--features wgpu-renderer,audio-output` 与 `--renderer wgpu`，依赖已启用 Metal。CI 配置检查 Apple Silicon / Intel 的构建和原生服务单元测试；尚未在本次开发环境执行 macOS 构建、窗口、声音、字体选择或 Metal 实机验证，也未提供 `.app` 打包、签名及公证。

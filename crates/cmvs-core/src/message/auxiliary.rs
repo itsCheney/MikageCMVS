@@ -209,6 +209,8 @@ pub struct AuxiliaryText {
     /// +416: atlas cells in use. Only atlas creation (0x14002e2f0) clears the table;
     /// 0x2386 drops the records without releasing their cells.
     pub(super) cells: BTreeSet<u16>,
+    /// Live atlas writes by cell. Cleared records leak cell numbers, but no longer draw.
+    pub(super) atlas_regions: BTreeMap<u16, [u32; 4]>,
     pub atlas: AuxiliaryGlyphAtlas,
     /// Owned atlas scene object; backing texture metadata belongs to `atlas`.
     /// It is not a scene slot and must never be drawn using guessed texture pixels.
@@ -218,13 +220,16 @@ pub struct AuxiliaryText {
     pub secondary_image: Option<ObjectImage>,
     /// +1472: a non-owned scene object moved along with this text group.
     pub associated_scene: Option<u8>,
+    /// Aoitori +404..+608, configured by 0x23b8; absent in the root build.
+    pub line_break: Option<super::LineBreakRules>,
+    pub(super) line_break_scratch: [u32; 2],
     motion: Option<PositionMotion>,
-    /// 2017 builds: 0x23b8 line-break rules (+0x194 enabled, +0x198 max overflow,
-    /// +0x19c hanging set, +0x1dc inseparable set). The 2016 layout has none.
-    pub(super) line_break: Option<super::LineBreakRules>,
 }
 
 impl AuxiliaryText {
+    pub fn line_break_scratch(&self) -> [u32; 2] {
+        self.line_break_scratch
+    }
     pub(super) fn motion(&self) -> Option<&PositionMotion> {
         self.motion.as_ref()
     }
@@ -339,6 +344,7 @@ impl AuxiliaryText {
         self.object.children.clear();
         self.glyphs.clear();
         self.attached.clear();
+        self.atlas_regions.clear();
         self.words.insert(176, self.words[&16]);
         self.words.insert(180, self.words[&20]);
     }
@@ -441,11 +447,13 @@ impl AuxiliaryText {
             glyphs: Vec::new(),
             attached: Vec::new(),
             cells: BTreeSet::new(),
+            atlas_regions: BTreeMap::new(),
             atlas,
             secondary_image: None,
             associated_scene: None,
-            motion: None,
             line_break: None,
+            line_break_scratch: [0; 2],
+            motion: None,
             object: SceneObject {
                 draw: Some(draw),
                 logical_size: RESEARCH_SCREEN,

@@ -117,17 +117,23 @@ fn metadata_entries_require_their_own_capability_and_complete_once() {
         let mut title = SaveTitle::default();
         let mut info = SaveInfo::default();
         let mut effects = true;
+        let mut scene = cmvs_rs::scene::SceneHost::default();
         let mut hosts = Hosts {
             gesture: (entry.capability == Capability::Gesture).then_some(&mut gesture),
             popup: (entry.capability == Capability::Popup).then_some(&mut popup),
             save_title: (entry.capability == Capability::SaveTitle).then_some(&mut title),
             save_info: (entry.capability == Capability::SaveInfo).then_some(&mut info),
             effects: (entry.capability == Capability::Effects).then_some(&mut effects),
-            effect_objects: entry.capability == Capability::EffectObjects,
+            scene: (entry.capability == Capability::EffectObjects).then_some(&mut scene),
             ..Default::default()
         };
         assert_eq!(
-            dispatch::run(Semantics::ResearchFontCells, &mut vm, &mut hosts).unwrap(),
+            dispatch::run(
+                Semantics::Research(cmvs_rs::profile::ResearchId::FontCells),
+                &mut vm,
+                &mut hosts
+            )
+            .unwrap(),
             Some(Flow::Unhandled)
         );
         assert_eq!(
@@ -264,7 +270,7 @@ fn metadata_failures_preserve_pending_command_results_and_existing_fields() {
                 save_title: Some(&mut title),
                 save_info: Some(&mut info),
                 effects: Some(&mut effects),
-                effect_objects: true,
+                scene: Some(&mut cmvs_rs::scene::SceneHost::default()),
                 ..Default::default()
             },
         )

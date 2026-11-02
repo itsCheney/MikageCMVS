@@ -24,6 +24,7 @@ use crate::{
 use std::{error::Error, sync::Arc};
 mod auxiliary;
 mod auxiliary_layout;
+mod auxiliary_measure;
 mod auxiliary_motion;
 pub(crate) mod font_cells;
 mod measure;
@@ -539,8 +540,6 @@ impl MessageHost {
             0x380 => return self.create_auxiliary_text(call),
             0x38c | 0x390 | 0x3a0 => return self.auxiliary_content(call),
             0x39c | 0x39f => return self.handle_auxiliary_motion(call),
-            // Mikage: 2017 builds; older profiles stop them at their gate.
-            0x3b8 | 0x3bb => return self.auxiliary_rules(call.vm, pc, command),
             _ => {}
         }
         if command == 0x382 {
@@ -704,68 +703,6 @@ impl MessageHost {
                     .stop_motion();
             }
         }
-        Ok(())
-    }
-    /// 2017 builds. 0x23b8 (0x14007aaa0, returns 0x4010): SP-4 group slot, SP-8 hanging
-    /// set (+0x19c), SP-12 inseparable set (+0x1dc), SP-16 max overflow (+0x198); it
-    /// enables the rules (+0x194 = 1) for the layout 0x140032700 and the pixel
-    /// measurement. 0x23bb (0x14007acb0 -> 0x140033970, returns 0x4008): SP-4 slot,
-    /// SP-8 text; system results 0 = 1, 1 = widest line, 2 = lines, 4 = last line, in
-    /// pixels. A missing group only sets the unmodeled +0x2f20 bit 0x1000.
-    fn auxiliary_rules(
-        &mut self,
-        vm: &mut Machine<'_>,
-        pc: usize,
-        command: u16,
-    ) -> Result<(), DecodeError> {
-        let opcode = 0x2000 + command;
-        let word = |distance| {
-            vm.stack()
-                .peek_u32(distance)
-                .map_err(|e| error(pc, opcode, e.0))
-        };
-        let slot = word(4)? as usize;
-        let group = self
-            .auxiliary_texts
-            .get(slot)
-            .and_then(Option::as_ref)
-            .ok_or_else(|| {
-                error(
-                    pc,
-                    opcode,
-                    "auxiliary text group does not exist or outside 0..7",
-                )
-            })?;
-        if command == 0x3bb {
-            let text = vm.resolve_string(word(8)?)?;
-            let [lines, widest, last] = group
-                .measure_pixels(&text)
-                .map_err(|why| error(pc, opcode, why))?;
-            vm.complete_system(crate::vm::SystemResult(0x4008))?;
-            for (index, value) in [(0, 1), (1, widest), (2, lines), (4, last)] {
-                vm.state_mut()
-                    .set_system_integer(index, value)
-                    .expect("result exists");
-            }
-            return Ok(());
-        }
-        // Both sets are 64-byte fields; the copy keeps the NUL-terminated prefix.
-        let set = |raw: Vec<u8>| -> Vec<u8> {
-            let raw = raw.split(|b| *b == 0).next().unwrap_or_default();
-            raw[..raw.len().min(63)].to_vec()
-        };
-        let hanging = set(vm.resolve_string(word(8)?)?.to_vec());
-        let inseparable = set(vm.resolve_string(word(12)?)?.to_vec());
-        let max_overflow = word(16)? as i32;
-        vm.complete_system(crate::vm::SystemResult(0x4010))?;
-        self.auxiliary_texts[slot]
-            .as_mut()
-            .expect("validated")
-            .line_break = Some(LineBreakRules {
-            max_overflow,
-            hanging,
-            inseparable,
-        });
         Ok(())
     }
     /// 0x140073280: slot, font name, glyph size, capacity; returns 0x4010 and
@@ -2328,7 +2265,7 @@ fn window_argument_names(command: u16) -> &'static [&'static str] {
 }
 
 fn is_text_state_command(command: u16) -> bool {
-    matches!(command, 0x100..=0x107 | 0x10c..=0x110 | 0x112..=0x117 | 0x119..=0x11a | 0x11e..=0x11f | 0x380 | 0x382 | 0x385..=0x387 | 0x389 | 0x38c | 0x38e..=0x390 | 0x392..=0x393 | 0x396 | 0x398 | 0x39a..=0x39c | 0x39e..=0x3a0 | 0x3b8 | 0x3bb)
+    matches!(command, 0x100..=0x107 | 0x10c..=0x110 | 0x112..=0x117 | 0x119..=0x11a | 0x11e..=0x11f | 0x380 | 0x382 | 0x385..=0x387 | 0x389 | 0x38c | 0x38e..=0x390 | 0x392..=0x393 | 0x396 | 0x398 | 0x39a..=0x39c | 0x39e..=0x3a0)
 }
 pub(super) fn text_argument_names(command: u16) -> &'static [&'static str] {
     match command {

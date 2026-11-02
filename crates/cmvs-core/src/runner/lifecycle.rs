@@ -211,6 +211,99 @@ mod tests {
         run.timers.begin_run(16);
         run.messages.set_record_output(true);
         run.messages.set_default_face(b"Retained Face");
+        run.scene.particle_effects.insert(
+            0,
+            crate::effect_objects::ParticleEffect {
+                template: None,
+                mode: 0,
+                parameters: [0; 4],
+                pool: Default::default(),
+                particles: Vec::new(),
+            },
+        );
+        assert!(
+            run.inspect_snapshot()
+                .unwrap_err()
+                .to_string()
+                .contains("active particle effects")
+        );
+        assert!(
+            run.load_slot(0, &mut backend)
+                .unwrap_err()
+                .to_string()
+                .contains("active particle effects")
+        );
+        run.scene.particle_effects.clear();
+        for kind in 0..3 {
+            run.scene.falling_effects.clear();
+            run.scene.collision_effects.clear();
+            if kind == 2 {
+                run.scene.fragment_effects.insert(
+                    3,
+                    crate::effect_objects::FragmentEffect {
+                        parameters: [20, 1000],
+                        elapsed: 0,
+                        complete: false,
+                        pool: Default::default(),
+                        fragments: Vec::new(),
+                    },
+                );
+            } else if kind == 1 {
+                run.scene.collision_effects.insert(
+                    2,
+                    crate::effect_objects::CollisionEffect {
+                        template: None,
+                        mode: 0,
+                        parameters: [0; 2],
+                        pool: Default::default(),
+                        particles: Vec::new(),
+                    },
+                );
+            } else {
+                run.scene.falling_effects.insert(
+                    1,
+                    crate::effect_objects::FallingEffect {
+                        template: None,
+                        parameters: [0; 4],
+                        follow: true,
+                        image: None,
+                        particles: Vec::new(),
+                    },
+                );
+            }
+            assert!(
+                run.inspect_snapshot()
+                    .unwrap_err()
+                    .to_string()
+                    .contains("active particle effects")
+            );
+            assert!(
+                run.load_slot(0, &mut backend)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("active particle effects")
+            );
+        }
+        run.scene.collision_effects.insert(
+            2,
+            crate::effect_objects::CollisionEffect {
+                template: None,
+                mode: 0,
+                parameters: [0; 2],
+                pool: Default::default(),
+                particles: Vec::new(),
+            },
+        );
+        run.scene.falling_effects.insert(
+            1,
+            crate::effect_objects::FallingEffect {
+                template: None,
+                parameters: [0; 4],
+                follow: true,
+                image: None,
+                particles: Vec::new(),
+            },
+        );
         let settings = run.settings.clone();
         let audio = run.audio.settings();
         let gesture = run.gesture.clone();
@@ -230,6 +323,10 @@ mod tests {
         assert_eq!(run.gesture, gesture);
         assert_eq!(&*run.messages.default_face(), b"Retained Face");
         assert_eq!(run.scene.clear(), crate::scene::ClearState::default());
+        assert!(run.scene.particle_effects().is_empty());
+        assert!(run.scene.falling_effects().is_empty());
+        assert!(run.scene.collision_effects().is_empty());
+        assert!(run.scene.fragment_effects().is_empty());
         assert!(!run.message_flags.skip());
         assert!(!run.message_flags.auto_advance());
         assert!(run.save_menu.popup_enabled());

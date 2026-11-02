@@ -299,12 +299,12 @@ impl<'a> Startup<'a> {
         self.images.set_patch(patch.clone());
         self.patch = patch;
     }
-    /// Research only: let unreviewed commands enter the selected research handler.
-    pub fn set_allow_unreviewed(&mut self, allow: bool) {
-        self.gate.set_allow_unreviewed(allow);
+    /// Block unreviewed commands before entering the selected dispatch handler.
+    pub fn set_block_unreviewed(&mut self, block: bool) {
+        self.gate.set_block_unreviewed(block);
     }
-    pub fn set_allow_presumed(&mut self, allow: bool) {
-        self.gate.set_allow_presumed(allow);
+    pub fn set_block_presumed(&mut self, block: bool) {
+        self.gate.set_block_presumed(block);
     }
     pub fn gate(&self) -> &CommandGate<'a> {
         &self.gate
@@ -382,6 +382,8 @@ impl<'a> Startup<'a> {
             &mut self.camera,
         )?;
         self.scene.advance_frame(delta_ms);
+        self.scene
+            .advance_effect_pools(delta_ms, &mut self.random, &self.camera)?;
         self.messages.advance_frame(delta_ms);
         self.messages
             .advance_auxiliary_motion(delta_ms, &mut self.scene)?;
@@ -464,6 +466,8 @@ impl<'a> Startup<'a> {
             &mut self.camera,
         )?;
         self.scene.advance_frame(delta_ms);
+        self.scene
+            .advance_effect_pools(delta_ms, &mut self.random, &self.camera)?;
         self.messages.advance_frame(delta_ms);
         self.messages
             .advance_auxiliary_motion(delta_ms, &mut self.scene)?;
@@ -537,6 +541,9 @@ impl<'a> Startup<'a> {
         mut backend: Box<dyn AudioBackend>,
     ) -> Result<(), Box<dyn Error>> {
         backend.configure_voice_ducking(self.audio.voice_ducking())?;
+        if !self.audio.output_enabled() {
+            backend.set_output_enabled(false)?;
+        }
         self.audio_backend = backend;
         Ok(())
     }
@@ -592,6 +599,10 @@ impl<'a> Startup<'a> {
         if self.quit {
             return Ok(StartupEvent::Quit);
         }
+        self.audio.sync_output_activity(
+            self.focused || self.settings.active_draw(),
+            self.audio_backend.as_mut(),
+        )?;
         if !self.frame_running() {
             return Ok(StartupEvent::Inactive);
         }
@@ -913,7 +924,6 @@ impl<'a> Startup<'a> {
             save_title: Some(&mut self.save_title),
             save_info: Some(&mut self.save_info),
             effects: Some(&mut self.effects),
-            effect_objects: true,
         };
         if crate::dispatch::uses_message_state(command) {
             hosts.messages = Some(&mut self.messages);

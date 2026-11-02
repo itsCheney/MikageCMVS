@@ -120,6 +120,7 @@ fn runner_legacy_presumed_policy_keeps_pending_state_on_rejection() {
         .unwrap();
     let script = root.script();
     let mut run = Startup::new(&script, &root.0, &game, 0).unwrap();
+    run.set_block_presumed(true);
     let mut backend = RecordingBackend::default();
     assert!(
         run.tick(&mut backend)
@@ -129,7 +130,7 @@ fn runner_legacy_presumed_policy_keeps_pending_state_on_rejection() {
     );
     let pc = run.machine().pc();
     let pending = run.machine().pending_system();
-    run.set_allow_unreviewed(true);
+    run.set_block_unreviewed(false);
     assert!(
         run.tick(&mut backend)
             .unwrap_err()
@@ -139,7 +140,7 @@ fn runner_legacy_presumed_policy_keeps_pending_state_on_rejection() {
     assert_eq!(run.machine().pc(), pc);
     assert_eq!(run.machine().pending_system(), pending);
     assert_eq!(run.gate().counts().presumed, 0);
-    run.set_allow_presumed(true);
+    run.set_block_presumed(false);
     assert_eq!(run.tick(&mut backend).unwrap(), StartupEvent::Progress);
     assert_eq!(run.gate().counts().presumed, 1);
 }
@@ -497,7 +498,7 @@ fn user_configuration_round_trips_live_settings_and_preserves_the_game_file() {
     }
     code.extend(0x2000u16.to_le_bytes());
     let root = Root::new("preferences", &code, b"");
-    let original = b"[MESSAGE_INFO]\nTEXT_WAIT=2\nTEXT_BOLD=0\n[FUTURE]\nUNKNOWN=\x82\xa0\n";
+    let original = b"[SOUND_INFO]\nINACTIVE_SOUND_PLAY=0\n[MESSAGE_INFO]\nTEXT_WAIT=2\nTEXT_BOLD=0\n[FUTURE]\nUNKNOWN=\x82\xa0\n";
     fs::write(root.0.join("cmvs.cfg"), original).unwrap();
     let directory = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("target")
@@ -542,6 +543,8 @@ fn user_configuration_round_trips_live_settings_and_preserves_the_game_file() {
     assert_eq!(resumed.settings(), &settings);
     assert_eq!(resumed.audio().settings(), audio);
     assert_eq!(resumed.audio().voice_ducking(), duck);
+    assert!(!resumed.audio().background_output());
+    assert!(!cmvs_rs::audio::AudioHost::from_ini(&first).background_output());
     assert_eq!(resumed.message_flags().mode_1548(), flags.mode_1548());
     assert_eq!(resumed.save_menu().confirmations(), confirmations);
     assert_eq!(
@@ -1675,6 +1678,15 @@ fn scenario_snapshot_failure_keeps_the_command_vm_and_image_unchanged() {
 
 #[test]
 fn scenario_snapshot_writes_a_slot_that_loads_back_with_backups() {
+    snapshot_slots_roundtrip(None);
+}
+
+#[test]
+fn aoitori_v3_snapshot_restores_text_scene_locals_and_backup_slots() {
+    snapshot_slots_roundtrip(Some("cmvs-20171114"));
+}
+
+fn snapshot_slots_roundtrip(profile: Option<&str>) {
     use cmvs_rs::{save::Csv2Save, snapshot::EngineSnapshot};
     // A load sets the window title from the base title 0x2160 gives.
     let mut code = string_call(0x2160);
@@ -1693,26 +1705,71 @@ fn scenario_snapshot_writes_a_slot_that_loads_back_with_backups() {
     for (op, word) in (0x2261..=0x2264).zip(&view_words[3..]) {
         commands::command(&mut code, op, &[*word]);
     }
+    let collision_points =
+        [[-1.0f32, 2.0, 0.0], [1.0, 2.0, 0.0], [0.0, 2.0, 1.0]].map(|p| p.map(f32::to_bits));
+    if profile.is_some() {
+        commands::command(&mut code, 0x2330, &[20]);
+        for point in collision_points {
+            commands::command(&mut code, 0x2332, &[20, point[0], point[1], point[2]]);
+        }
+        commands::command(&mut code, 0x2011, &[0, 10]);
+        commands::command(
+            &mut code,
+            0x22a5,
+            &[
+                0,
+                0,
+                0,
+                40.0f32.to_bits(),
+                20.0f32.to_bits(),
+                0,
+                2000.0f32.to_bits(),
+                2,
+            ],
+        );
+    }
     let snapshot_pc = code.len();
     code.extend(0x22b2u16.to_le_bytes());
+    if profile.is_some() {
+        commands::command(&mut code, 0x2331, &[20]);
+    }
     commands::command(&mut code, 0x2260, &[0; 3]);
     system_call(&mut code, 0x2092, &[5, 1, 7]);
     system_call(&mut code, 0x22b6, &[3]);
     let end = code.len();
     code.extend(0x27ffu16.to_le_bytes());
-    let root = Root::new("snapshot-slots", &code, b"Synthetic ");
+    let root = Root::new(
+        &format!("snapshot-slots-{}", profile.unwrap_or("synthetic")),
+        &code,
+        b"Synthetic data\\pack\\ ",
+    );
     fs::write(root.0.join("save/system.dat"), auto_resume_save(0x12345678)).unwrap();
-    let directory = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
-        .join(format!("cmvs-runner-slots-{}", std::process::id()));
+    if profile.is_some() {
+        fs::write(root.0.join("data/pack/Synthetic"), b"NONE").unwrap();
+    }
+    let directory = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!(
+        "cmvs-runner-slots-{}-{}",
+        std::process::id(),
+        profile.unwrap_or("synthetic")
+    ));
     let _ = fs::remove_dir_all(&directory);
     let script = root.script();
-    let mut run = Startup::new(&script, &root.0, &root.game(), 0).unwrap();
+    let game = match profile {
+        Some(id) => Registry::builtin()
+            .identify_game(&root.0, Some(id))
+            .unwrap(),
+        None => root.game(),
+    };
+    let mut run = Startup::new(&script, &root.0, &game, 0).unwrap();
     run.set_user_data_directory(&directory).unwrap();
     run.set_record_text(true);
     let mut backend = RecordingBackend::default();
     let run_to_end = |run: &mut Startup<'_>, backend: &mut RecordingBackend| {
         let mut captured = 0;
         loop {
+            if run.machine().pc() == end {
+                return captured;
+            }
             match run.tick(backend).unwrap() {
                 StartupEvent::Progress => {}
                 StartupEvent::Yield => run.advance_frame(400).unwrap(),
@@ -1737,6 +1794,19 @@ fn scenario_snapshot_writes_a_slot_that_loads_back_with_backups() {
         (snapshot.active_slot, snapshot.pc, snapshot.repeat_count),
         (0, snapshot_pc as u32 + 2, 0)
     );
+    if profile.is_some() {
+        assert_eq!(
+            snapshot.objects[&20].collision_vertices.as_deref(),
+            Some(collision_points.as_slice())
+        );
+        assert_eq!(run.scene().object(20).unwrap().collision_vertices, None);
+        let effect =
+            cmvs_rs::snapshot::SavedEffect::decode(&snapshot.raw_objects[&(0x800, 0)]).unwrap();
+        assert_eq!(effect.image_name(), b"Synthetic");
+        assert!(
+            matches!(effect, cmvs_rs::snapshot::SavedEffect::Particles { words, .. } if words[5] == 2)
+        );
+    }
     assert_eq!(snapshot.variables.integers()[5], 42);
     assert_eq!(snapshot.variables.packed_bits()[0] & 1, 1);
     assert_eq!(snapshot.texts[7].as_ref().unwrap().glyphs.len(), 9);
@@ -1768,6 +1838,22 @@ fn scenario_snapshot_writes_a_slot_that_loads_back_with_backups() {
     assert_eq!(run.machine().state().integer(5), Some(42));
     assert_eq!(run.machine().state().bit(0), Some(true));
     assert_eq!(run.camera().view(0).unwrap().words, view_words);
+    if profile.is_some() {
+        assert_eq!(
+            run.scene()
+                .object(20)
+                .unwrap()
+                .collision_vertices
+                .as_deref(),
+            Some(collision_points.as_slice())
+        );
+        assert_eq!(run.scene().particle_effects()[&0].particles.len(), 2);
+        assert_eq!(
+            run.inspect_snapshot().unwrap().raw_objects[&(0x800, 0)],
+            snapshot.raw_objects[&(0x800, 0)]
+        );
+    }
+
     let restored = run.scene().object(20).unwrap().image.as_ref().unwrap();
     assert!(restored.alpha && !restored.surface && restored.name.is_empty());
     assert!(
@@ -1827,8 +1913,76 @@ fn scenario_snapshot_writes_a_slot_that_loads_back_with_backups() {
     let before = run.inspect_snapshot().unwrap().encode().unwrap();
     assert!(run.load_slot(4, &mut backend).is_err());
     assert_eq!(run.inspect_snapshot().unwrap().encode().unwrap(), before);
+    if profile.is_some() {
+        // Corrupt the on-disk 0x749 count rather than asking the checked encoder
+        // to produce an invalid scene. The old VM, mesh and particles must survive.
+        let mut mesh_bytes = snapshot.encode().unwrap();
+        let mut mesh_header = 0x749u16.to_le_bytes().to_vec();
+        mesh_header.extend(44u32.to_le_bytes());
+        mesh_header.extend(0u32.to_le_bytes());
+        mesh_header.extend(3u32.to_le_bytes());
+        let at = mesh_bytes
+            .windows(mesh_header.len())
+            .position(|w| w == mesh_header)
+            .unwrap();
+        mesh_bytes[at + 10..at + 14].copy_from_slice(&u32::MAX.to_le_bytes());
+        let bytes =
+            Csv2Save::encode(header, &mesh_bytes, &save.auxiliary, &save.script_image).unwrap();
+        fs::write(directory.join("save004.dat"), bytes).unwrap();
+        assert!(
+            run.load_slot(4, &mut backend)
+                .unwrap_err()
+                .to_string()
+                .contains("collision vertex count")
+        );
+        assert_eq!(run.inspect_snapshot().unwrap().encode().unwrap(), before);
+        assert_eq!(
+            run.scene()
+                .object(20)
+                .unwrap()
+                .collision_vertices
+                .as_deref(),
+            Some(collision_points.as_slice())
+        );
+        let mut malformed = snapshot.clone();
+        malformed.raw_objects.get_mut(&(0x800, 0)).unwrap()[24..28]
+            .copy_from_slice(&u32::MAX.to_le_bytes());
+        let bytes = Csv2Save::encode(
+            header,
+            &malformed.encode().unwrap(),
+            &save.auxiliary,
+            &save.script_image,
+        )
+        .unwrap();
+        fs::write(directory.join("save004.dat"), bytes).unwrap();
+        let particles: Vec<_> = run.scene().particle_effects()[&0]
+            .particles
+            .iter()
+            .map(|p| p.words)
+            .collect();
+        let pc = run.machine().pc();
+        assert!(
+            run.load_slot(4, &mut backend)
+                .unwrap_err()
+                .to_string()
+                .contains("saved particle count")
+        );
+        assert_eq!(run.machine().pc(), pc);
+        assert_eq!(run.inspect_snapshot().unwrap().encode().unwrap(), before);
+        assert_eq!(
+            run.scene().particle_effects()[&0]
+                .particles
+                .iter()
+                .map(|p| p.words)
+                .collect::<Vec<_>>(),
+            particles
+        );
+    }
     drop(run);
     fs::remove_dir_all(&directory).unwrap();
+    if profile.is_some() {
+        fs::remove_file(root.0.join("data/pack/Synthetic")).unwrap();
+    }
 }
 
 #[test]

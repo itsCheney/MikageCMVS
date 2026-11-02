@@ -91,6 +91,10 @@ pub struct SePlayback {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AudioRequest {
+    /// Silence output while consuming audio normally; playback and gains are retained.
+    SetOutputEnabled {
+        enabled: bool,
+    },
     ConfigureVoiceDucking {
         settings: VoiceDuckingSettings,
     },
@@ -189,6 +193,12 @@ pub enum AudioRequest {
 }
 
 pub trait AudioBackend {
+    /// Apply a device-wide output gate without stopping streams or changing their gains.
+    /// Err leaves the gate unchanged.
+    fn set_output_enabled(&mut self, _enabled: bool) -> Result<(), Box<dyn Error>> {
+        Err("audio backend does not implement output gating".into())
+    }
+
     /// Queue a full parameter change atomically; active cycles keep their old values.
     fn configure_voice_ducking(
         &mut self,
@@ -316,6 +326,10 @@ impl RecordingAudio {
     }
 }
 impl AudioBackend for RecordingAudio {
+    fn set_output_enabled(&mut self, enabled: bool) -> Result<(), Box<dyn Error>> {
+        self.record(AudioRequest::SetOutputEnabled { enabled })
+    }
+
     fn fade_out_voice(&mut self, channel: u8, fade_ms: u32) -> Result<(), Box<dyn Error>> {
         self.record(AudioRequest::FadeOutVoice { channel, fade_ms })
     }
@@ -387,6 +401,9 @@ impl AudioBackend for RecordingAudio {
 
 #[derive(Debug)]
 pub struct AudioHost {
+    background_output: bool,
+    output_active: bool,
+    output_enabled: bool,
     settings: AudioSettings,
     /// Device +2424/+2428/+2432/+2436, including the most recent queued update.
     voice_ducking: VoiceDuckingSettings,
@@ -396,10 +413,6 @@ pub struct AudioHost {
     /// zeroes it, and stopping keeps it. Only the snapshot reads it here.
     played: [u32; SE_CHANNELS],
     bgm: BgmState,
-    /// Mikage, 2017 builds: sound device +0xaec (constructor 0x14008e290 sets 1;
-    /// 2017-11-29 cmvs64.exe). While it and +0xae8 are clear, the mixer forces the
-    /// volumes down when the window is inactive. Set by 0x22ed.
-    background_sound: bool,
 }
 
 impl Default for AudioHost {
@@ -442,18 +455,65 @@ impl AudioHost {
     }
     pub fn new(settings: AudioSettings) -> Self {
         Self {
+            background_output: true,
+            output_active: true,
+            output_enabled: true,
             settings,
             voice_ducking: VoiceDuckingSettings::default(),
             channels: Default::default(),
             mixer: VoiceMixer::default(),
             played: [0; SE_CHANNELS],
             bgm: BgmState::default(),
-            background_sound: true,
         }
     }
-    /// Whether the game keeps its sound while the window is inactive (0x22ed).
-    pub fn background_sound(&self) -> bool {
-        self.background_sound
+    pub fn background_output(&self) -> bool {
+        self.background_output
+    }
+    pub fn output_enabled(&self) -> bool {
+        self.output_enabled
+    }
+    /// The device combines its foreground flag with the script's background switch.
+    pub fn sync_output_activity(
+        &mut self,
+        active: bool,
+        backend: &mut dyn AudioBackend,
+    ) -> Result<(), Box<dyn Error>> {
+        let enabled = active || self.background_output;
+        if enabled != self.output_enabled {
+            backend.set_output_enabled(enabled)?;
+        }
+        self.output_active = active;
+        self.output_enabled = enabled;
+        Ok(())
+    }
+    /// Identity-bound 0x22ed research entry; the root build has no handler.
+    pub(crate) fn handle_background_output(
+        &mut self,
+        call: &mut Call<'_, '_>,
+        backend: &mut dyn AudioBackend,
+    ) -> Result<(), Box<dyn Error>> {
+        let write = call.argument(4, "write")? != 0;
+        let background = if write {
+            call.argument(8, "background output")? != 0
+        } else {
+            call.ignore_argument(8, "unused background output")?;
+            self.background_output
+        };
+        if write {
+            let enabled = self.output_active || background;
+            if enabled != self.output_enabled {
+                backend.set_output_enabled(enabled)?;
+            }
+            call.complete(0x4008)?;
+            self.background_output = background;
+            self.output_enabled = enabled;
+        } else {
+            call.complete(0x4008)?;
+            call.vm
+                .state_mut()
+                .set_system_integer(0, u32::from(background))?;
+        }
+        Ok(())
     }
     pub fn bgm(&self) -> &BgmState {
         &self.bgm
@@ -469,6 +529,8 @@ impl AudioHost {
     pub fn from_ini(text: &[u8]) -> Self {
         let mut host = Self::default();
         let int = |key, default| crate::save_menu::profile_int(text, "SOUND_INFO", key, default);
+        // Aoitori 0x14000d1d7: INI defaults to 1 and any nonzero word enables output.
+        host.background_output = int("INACTIVE_SOUND_PLAY", 1) != 0;
         host.settings.bgm_enabled = int("MUSIC_USE", 1) != 0;
         host.settings.se_enabled = int("SE_USE", 1) != 0;
         host.settings.voice_enabled = int("VOICE_USE", 1) != 0;
@@ -500,7 +562,7 @@ impl AudioHost {
         let Some((pc, command)) = vm.pending_system() else {
             return Ok(false);
         };
-        if !matches!(command, 0xa0..=0xa2 | 0xa4 | 0xa6 | 0xa8..=0xaa | 0xaf..=0xb1 | 0xb3 | 0xb5..=0xb7 | 0xba | 0x238..=0x23f | 0x241 | 0x2d6..=0x2dd | 0x2ed)
+        if !matches!(command, 0xa0..=0xa2 | 0xa4 | 0xa6 | 0xa8..=0xaa | 0xaf..=0xb1 | 0xb3 | 0xb5..=0xb7 | 0xba | 0x238..=0x23f | 0x241 | 0x2d6..=0x2dd)
         {
             return Ok(false);
         }
@@ -545,22 +607,6 @@ impl AudioHost {
                 return Ok(());
             }
             0x2d6..=0x2dd => return self.try_settings_query(call, backend),
-            0x2ed => {
-                // Mikage, 2017 builds: 0x22ed (0x1400834c0, pops 8). A zero SP-4
-                // copies +0xaec to system result 0, otherwise +0xaec = bool(SP-8).
-                let set = call.argument(4, "mode")? != 0;
-                let value = call.argument(8, "value")? != 0;
-                call.complete(0x4008)?;
-                if set {
-                    self.background_sound = value;
-                } else {
-                    call.vm
-                        .state_mut()
-                        .set_system_integer(0, u32::from(self.background_sound))
-                        .expect("slot 0 exists");
-                }
-                return Ok(());
-            }
             0xa8 => return self.try_voice_stop(call, backend),
             0xa9 => return self.try_voice_fade_out(call, backend),
             0xa6 | 0xaf => return self.try_voice_play(call, backend),

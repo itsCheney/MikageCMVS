@@ -356,6 +356,19 @@ impl Renderer {
                         *blend,
                     )
                 }
+                Layer::Billboard { image, quad, alpha } => {
+                    source = Some(&image.pixels);
+                    p[4..8].copy_from_slice(&[
+                        0.0,
+                        0.0,
+                        image.pixels.width() as f32,
+                        image.pixels.height() as f32,
+                    ]);
+                    p[3] = 1.0;
+                    p[19] = 16.0;
+                    let [l, t, r, b] = quad.map(|v| v + 0.5);
+                    ([[l, t], [r, t], [l, b], [r, b]], *alpha, Blend::Alpha)
+                }
                 Layer::Projected {
                     image,
                     rect,
@@ -549,16 +562,19 @@ mod tests {
                 ]
             })
             .collect();
-        for (scale, angle, mode) in [
-            (1.0f32, 0.0f32, 1),
-            (1.0, 0.0, 2),
-            (1.5, 0.0, 1),
-            (0.75, 0.0, 2),
-            (1.0, 60.0, 1),
+        for (scale, angle, mode, rect) in [
+            (1.0f32, 0.0f32, 1, [0u32, 0, 6, 4]),
+            (1.0, 0.0, 2, [0, 0, 6, 4]),
+            (1.5, 0.0, 1, [0, 0, 6, 4]),
+            (0.75, 0.0, 2, [0, 0, 6, 4]),
+            (1.0, 60.0, 1, [0, 0, 6, 4]),
+            (1.0, 0.0, 1, [u32::MAX, u32::MAX, 8, 6]),
+            (1.5, 0.0, 1, [u32::MAX, u32::MAX, 8, 6]),
+            (1.0, 60.0, 1, [u32::MAX, u32::MAX, 8, 6]),
         ] {
             let mut draw = DrawState::default();
             draw.words[1] = mode;
-            draw.words[4..6].copy_from_slice(&[6, 4]);
+            draw.words[2..6].copy_from_slice(&rect);
             draw.words[8..10].copy_from_slice(&[2, 1]);
             draw.words[18..20].fill(scale.to_bits());
             draw.words[20] = angle.to_bits();
@@ -588,6 +604,36 @@ mod tests {
                     "scale={scale} angle={angle} mode={mode} byte={i}: {a} != {b}"
                 );
             }
+        }
+
+        // World billboards retain queue 5's WRAP sampler at both texture edges.
+        let wrapped = ObjectImage {
+            name: Vec::new(),
+            filter: None,
+            alpha: true,
+            surface: false,
+            pixels: RgbaImage::new(2, 1, vec![255, 0, 0, 255, 0, 0, 255, 255]).unwrap(),
+        };
+        let image = gpu
+            .compose(
+                [4, 2],
+                [0, 0, 0, 255],
+                &[Layer::Billboard {
+                    image: &wrapped,
+                    quad: [0.0, 0.0, 4.0, 2.0],
+                    alpha: 255,
+                }],
+            )
+            .unwrap()
+            .read()
+            .unwrap();
+        for row in image.pixels().as_chunks::<16>().0 {
+            assert_eq!(
+                row,
+                &[
+                    128, 0, 128, 255, 255, 0, 0, 255, 128, 0, 128, 255, 0, 0, 255, 255
+                ]
+            );
         }
 
         // Coverage lookup, screen-space second texture, and texture blackening.

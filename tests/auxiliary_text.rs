@@ -1139,27 +1139,7 @@ fn proportional_auxiliary_text_uses_advances_for_single_and_double_byte_glyphs()
     messages.set_record_output(true);
     messages.set_glyph_metrics(Box::new(Metrics));
     for _ in 0..4 {
-        pending(&mut vm);
-        let mut input = cmvs_rs::input::ActionInput::default();
-        let profile = cmvs_rs::profile::Registry::builtin()
-            .profile("cmvs-20171114")
-            .unwrap();
-        let command = vm.pending_system().unwrap().1;
-        let mut hosts = cmvs_rs::dispatch::Hosts::default();
-        if cmvs_rs::dispatch::uses_message_state(command) {
-            hosts.messages = Some(&mut messages);
-        } else {
-            hosts.text = Some(cmvs_rs::dispatch::TextHosts {
-                messages: &mut messages,
-                input: &mut input,
-                flags: Default::default(),
-            });
-        }
-        match cmvs_rs::dispatch::run(profile.semantics(command), &mut vm, &mut hosts).unwrap() {
-            Some(cmvs_rs::dispatch::Flow::Done) => {}
-            None => assert!(messages.shared_message(&mut vm).unwrap()),
-            other => panic!("unexpected dispatch {other:?}"),
-        }
+        research_call(&mut vm, &mut messages).unwrap();
     }
     let group = messages.auxiliary_text(7).unwrap();
     assert_eq!(
@@ -1296,6 +1276,7 @@ fn half_width_text_advances_half_a_cell_like_the_measurement() {
         ]
     );
 }
+
 
 #[test]
 fn measurement_counts_lines_and_byte_columns_from_the_pen() {
@@ -1462,7 +1443,7 @@ fn exhausted_cells_leave_glyphs_detached_and_cells_must_fit_the_atlas() {
                 (0x2387, &[7, 30, u32::MAX, u32::MAX]),
                 (0x238b, &[7, 1]),
             ],
-            1,
+            16,
         ),
     ] {
         let script = content_script(&calls, &b"\x82\xa0".repeat(glyphs));
@@ -1474,81 +1455,317 @@ fn exhausted_cells_leave_glyphs_detached_and_cells_must_fit_the_atlas() {
     }
 }
 
-#[test]
-fn pixel_measurement_reports_widths_in_pixels_with_the_2017_slots() {
-    // あいうえ。 fit (。 stays), か wraps, \n starts line 3 with two half-width bytes.
-    let text = [KANA, b"\\nAB"].concat();
-    let mut calls = AREA.to_vec();
-    calls.push((0x23bb, &[7, 1]));
-    let script = content_script(&calls, &text);
-    let mut vm = Machine::new(&script).unwrap();
-    let mut messages = MessageHost::default();
-    run_calls(&mut vm, &mut messages, 3);
-    for i in 0..7 {
-        vm.state_mut().set_system_integer(i, 70 + i).unwrap();
+fn research_call(
+    vm: &mut Machine<'_>,
+    messages: &mut MessageHost,
+) -> Result<(), Box<dyn std::error::Error>> {
+    pending(vm);
+    let mut input = cmvs_rs::input::ActionInput::default();
+    let profile = cmvs_rs::profile::Registry::builtin()
+        .profile("cmvs-20171114")
+        .unwrap();
+    let command = vm.pending_system().unwrap().1;
+    let mut hosts = cmvs_rs::dispatch::Hosts::default();
+    if cmvs_rs::dispatch::uses_message_state(command) {
+        hosts.messages = Some(messages);
+    } else {
+        hosts.text = Some(cmvs_rs::dispatch::TextHosts {
+            messages,
+            input: &mut input,
+            flags: Default::default(),
+        });
     }
-    run(&mut vm, &mut messages);
-    assert_eq!(vm.stack().len_bytes(), 0);
-    // Five 26-pixel cells, three lines, two 14-pixel half cells.
-    for (i, value) in [(0, 1), (1, 130), (2, 3), (4, 28)] {
-        assert_eq!(vm.state().system_integer(i), Some(value));
-    }
-    for i in [3, 5, 6] {
-        assert_eq!(vm.state().system_integer(i), Some(70 + i));
+    match cmvs_rs::dispatch::run(profile.semantics(command), vm, &mut hosts)? {
+        Some(cmvs_rs::dispatch::Flow::Done) => Ok(()),
+        other => panic!("unexpected dispatch {other:?}"),
     }
 }
 
 #[test]
-fn line_break_rules_replace_the_built_in_closing_marks() {
-    // Text at 1; its terminator doubles as the empty set and 。 follows it.
-    let mut segment = [KANA, b"\\nAB"].concat();
-    let empty = segment.len() as u32 + 1;
-    segment.push(0);
-    let hanging = empty + 1;
-    segment.extend(b"\x81\x42");
-    for (set, expected) in [(empty, [3, 104, 28]), (hanging, [3, 130, 28])] {
-        let mut calls = AREA.to_vec();
-        let rules = [7, set, empty, 1];
-        let measure = [7, 1];
-        calls.push((0x23b8, &rules));
-        calls.push((0x23bb, &measure));
-        let script = content_script(&calls, &segment);
+fn auxiliary_extended_rules_bound_hanging_and_identical_character_runs() {
+    let period = b"\x81\x42".as_slice();
+    let a = b"\x82\xa0".as_slice();
+    for (hanging, inseparable, text, limit, positions) in [
+        (
+            period,
+            &b""[..],
+            b"\x82\xa0\x82\xa2\x81\x42\x81\x42\x82\xa9".as_slice(),
+            1,
+            vec![[0, 0], [24, 0], [48, 0], [0, 24], [24, 24]],
+        ),
+        (
+            period,
+            &b""[..],
+            b"\x82\xa0\x82\xa2\x81\x42".as_slice(),
+            u32::MAX,
+            vec![[0, 0], [24, 0], [48, 0]],
+        ),
+        (
+            &b""[..],
+            a,
+            b"\x82\xa0\x82\xa0\x82\xa0\x82\xa0".as_slice(),
+            1,
+            vec![[0, 0], [24, 0], [48, 0], [0, 24]],
+        ),
+        (
+            &b""[..],
+            a,
+            b"\x82\xa0\x82\xa2\x82\xa0".as_slice(),
+            1,
+            vec![[0, 0], [24, 0], [0, 24]],
+        ),
+    ] {
+        let script = content_script(
+            &[
+                (0x2380, &[7, 0, 24, 64]),
+                (0x2385, &[7, 0, 0, 72, 200]),
+                (0x23b8, &[7, 0x80000000, 0x80000001, limit]),
+                (0x238b, &[7, 1]),
+            ],
+            text,
+        );
         let mut vm = Machine::new(&script).unwrap();
+        vm.state_mut().set_string(0, hanging).unwrap();
+        vm.state_mut().set_string(1, inseparable).unwrap();
         let mut messages = MessageHost::default();
-        run_calls(&mut vm, &mut messages, 4);
+        messages.set_record_output(true);
+        for _ in 0..2 {
+            research_call(&mut vm, &mut messages).unwrap();
+        }
+        for i in 0..7 {
+            vm.state_mut().set_system_integer(i, 70 + i).unwrap();
+        }
+        research_call(&mut vm, &mut messages).unwrap();
+        assert_eq!(
+            messages.auxiliary_text(7).unwrap().line_break_scratch(),
+            [0; 2]
+        );
+        research_call(&mut vm, &mut messages).unwrap();
+        let group = messages.auxiliary_text(7).unwrap();
+        assert_eq!(
+            group.glyphs.iter().map(|g| g.position).collect::<Vec<_>>(),
+            positions
+        );
+        for i in 0..7 {
+            assert_eq!(vm.state().system_integer(i), Some(70 + i));
+        }
         assert_eq!(vm.stack().len_bytes(), 0);
-        run(&mut vm, &mut messages);
-        for (i, value) in [(1, expected[1]), (2, expected[0]), (4, expected[2])] {
-            assert_eq!(vm.state().system_integer(i), Some(value), "set {set}");
+    }
+}
+
+#[test]
+fn auxiliary_queries_restore_pen_preserve_glyphs_and_report_bytes_or_font_widths() {
+    #[derive(Debug)]
+    struct Metrics;
+    impl cmvs_rs::message::GlyphMetrics for Metrics {
+        fn ink_width(&self, _: &[u8], _: u16, _: u32) -> Result<u32, &'static str> {
+            Ok(99)
+        }
+        fn advance_width(&self, _: &[u8], code: u16, _: u32, _: bool) -> Result<u32, &'static str> {
+            Ok(match code {
+                0x82a0 => 13,
+                0x82a2 => 17,
+                _ => 3,
+            })
         }
     }
-    // The layout follows the rules too: without 。 in the set it starts line 2.
-    let mut calls = AREA.to_vec();
-    let rules = [7, empty, empty, 1];
-    calls.push((0x23b8, &rules));
-    calls.push((0x238b, &[7, 1]));
-    let script = content_script(&calls, &segment);
+    for (op, expected) in [(0x23b9, [3, 2, 3]), (0x23bb, [20, 2, 20])] {
+        let script = content_script(
+            &[
+                (0x2380, &[7, 0, 24, 64]),
+                (0x2385, &[7, 0, 0, 72, 200]),
+                (0x23b8, &[7, 0, 0, 1]),
+                (0x23ac, &[1]),
+                (op, &[7, 1]),
+                (op, &[7, 1]),
+            ],
+            b"\x82\xa0A\\n{\x82\xa2/r}B",
+        );
+        let mut vm = Machine::new(&script).unwrap();
+        let mut messages = MessageHost::default();
+        messages.set_glyph_metrics(Box::new(Metrics));
+        for _ in 0..4 {
+            research_call(&mut vm, &mut messages).unwrap();
+        }
+        for i in 0..7 {
+            vm.state_mut().set_system_integer(i, 90 + i).unwrap();
+        }
+        for _ in 0..2 {
+            research_call(&mut vm, &mut messages).unwrap();
+            for (i, v) in [(0, 1), (1, expected[0]), (2, expected[1]), (4, expected[2])] {
+                assert_eq!(vm.state().system_integer(i), Some(v));
+            }
+            for i in [3, 5, 6] {
+                assert_eq!(vm.state().system_integer(i), Some(90 + i));
+            }
+            let group = messages.auxiliary_text(7).unwrap();
+            assert_eq!([group.word(176), group.word(180)], [Some(0), Some(0)]);
+            assert!(group.glyphs.is_empty());
+            assert_eq!(group.line_break_scratch(), [0, u32::from(b'B')]);
+        }
+        assert_eq!(vm.stack().len_bytes(), 0);
+    }
+}
+
+#[test]
+fn auxiliary_rule_errors_are_retryable_without_changing_rules_or_results() {
+    for bad in [vec![0x82], vec![0x82; 64]] {
+        let script = content_script(
+            &[
+                (0x2380, &[7, 0, 24, 64]),
+                (0x23b8, &[7, 0x80000000, 0, 1]),
+                (0x23b8, &[7, 0x80000000, 0, 2]),
+            ],
+            b"",
+        );
+        let mut vm = Machine::new(&script).unwrap();
+        vm.state_mut().set_string(0, b"\x81\x42").unwrap();
+        let mut messages = MessageHost::default();
+        research_call(&mut vm, &mut messages).unwrap();
+        research_call(&mut vm, &mut messages).unwrap();
+        let old = messages.auxiliary_text(7).unwrap().line_break.clone();
+        vm.state_mut().set_string(0, &bad).unwrap();
+        pending(&mut vm);
+        let pc = vm.pc();
+        let stack = stack_words(&vm);
+        assert!(research_call(&mut vm, &mut messages).is_err());
+        assert_eq!(vm.pc(), pc);
+        assert_eq!(stack_words(&vm), stack);
+        assert_eq!(messages.auxiliary_text(7).unwrap().line_break, old);
+        vm.state_mut().set_string(0, b"\x81\x42").unwrap();
+        research_call(&mut vm, &mut messages).unwrap();
+        assert_eq!(
+            messages
+                .auxiliary_text(7)
+                .unwrap()
+                .line_break
+                .as_ref()
+                .unwrap()
+                .max_overflow,
+            2
+        );
+        assert_eq!(vm.stack().len_bytes(), 0);
+    }
+}
+
+#[test]
+fn auxiliary_query_errors_preserve_pending_parameters_and_can_retry() {
+    for (op, bad) in [(0x23b9, b"\\w".as_slice()), (0x23bb, b"A".as_slice())] {
+        let script = content_script(&[(0x2380, &[7, 0, 24, 64]), (op, &[7, 0x80000002])], b"");
+        let mut vm = Machine::new(&script).unwrap();
+        vm.state_mut().set_string(2, bad).unwrap();
+        let mut messages = MessageHost::default();
+        research_call(&mut vm, &mut messages).unwrap();
+        for i in 0..7 {
+            vm.state_mut().set_system_integer(i, 50 + i).unwrap();
+        }
+        pending(&mut vm);
+        let pc = vm.pc();
+        let stack = stack_words(&vm);
+        assert!(research_call(&mut vm, &mut messages).is_err());
+        assert_eq!(vm.pc(), pc);
+        assert_eq!(stack_words(&vm), stack);
+        assert_eq!(
+            messages.auxiliary_text(7).unwrap().line_break_scratch(),
+            [0; 2]
+        );
+        for i in 0..7 {
+            assert_eq!(vm.state().system_integer(i), Some(50 + i));
+        }
+        vm.state_mut().set_string(2, b"\x82\xa0").unwrap();
+        research_call(&mut vm, &mut messages).unwrap();
+        assert_eq!(
+            vm.state().system_integer(1),
+            Some(if op == 0x23b9 { 2 } else { 24 })
+        );
+        assert_eq!(vm.stack().len_bytes(), 0);
+    }
+}
+
+#[test]
+fn font_cell_auxiliary_fixed_width_literals_use_half_cells() {
+    let script = content_script(
+        &[
+            (0x2380, &[7, 0, 24, 64]),
+            (0x2385, &[7, 0, 0, 200, 200]),
+            (0x238b, &[7, 1]),
+        ],
+        b"A\\@\\%\\{\\}\\\"\x82\xa0",
+    );
     let mut vm = Machine::new(&script).unwrap();
     let mut messages = MessageHost::default();
     messages.set_record_output(true);
-    run_calls(&mut vm, &mut messages, 5);
+    for _ in 0..3 {
+        research_call(&mut vm, &mut messages).unwrap();
+    }
     let group = messages.auxiliary_text(7).unwrap();
-    let placed: Vec<(u16, [i32; 2])> = group.glyphs.iter().map(|g| (g.code, g.position)).collect();
-    assert_eq!(placed[4], (0x8142, [100, 80]));
+    assert_eq!(
+        group.glyphs.iter().map(|g| g.code).collect::<Vec<_>>(),
+        [65, 92, 37, 123, 125, 34, 0x82a0]
+    );
+    assert_eq!(
+        group.glyphs.iter().map(|g| g.position).collect::<Vec<_>>(),
+        [[0, 0], [12, 0], [24, 0], [36, 0], [48, 0], [60, 0], [72, 0]]
+    );
 }
 
 #[test]
-fn rules_and_pixel_measurement_need_a_created_group() {
-    for (op, args) in [(0x23b8u16, &[6u32, 1, 1, 0][..]), (0x23bb, &[6, 1])] {
-        let mut calls = AREA.to_vec();
-        calls.push((op, args));
-        let script = content_script(&calls, b"x");
-        let mut vm = Machine::new(&script).unwrap();
-        let mut messages = MessageHost::default();
-        run_calls(&mut vm, &mut messages, 3);
-        pending(&mut vm);
-        let before = stack_words(&vm);
-        assert!(messages.try_handle(&mut vm).is_err());
-        assert_eq!(stack_words(&vm), before);
-    }
+fn auxiliary_smaller_raster_uses_the_original_grid_without_reallocating() {
+    let script = content_script(
+        &[
+            (0x2380, &[7, 0, 30, 0]),
+            (0x2385, &[7, 0, 0, 1000, 700]),
+            (0x2387, &[7, 28, 0, 0]),
+            (0x238b, &[7, 1]),
+        ],
+        &b"\x82\xa0".repeat(141),
+    );
+    let mut vm = Machine::new(&script).unwrap();
+    let mut messages = MessageHost::default();
+    messages.set_record_output(true);
+    run_calls(&mut vm, &mut messages, 4);
+    let mut scene = cmvs_rs::scene::SceneHost::default();
+    messages.advance_auxiliary_motion(16, &mut scene).unwrap();
+    let group = messages.auxiliary_text(7).unwrap();
+    assert_eq!((group.atlas.cell_side, group.atlas.grid_side), (36, 28));
+    assert_eq!(group.atlas.texture_size, [1024, 1024]);
+    assert_eq!(group.attached_glyphs().count(), 141);
+    assert!(group.attached_glyphs().all(|g| g.size == 28));
+}
+
+#[test]
+fn auxiliary_resizing_rejects_live_atlas_overlap_but_clear_releases_the_pixels() {
+    let script = content_script(
+        &[
+            (0x2380, &[7, 0, 30, 0]),
+            (0x238b, &[7, 1]),
+            (0x2387, &[7, 28, 0, 0]),
+            (0x238b, &[7, 1]),
+            (0x2386, &[7]),
+            (0x238b, &[7, 1]),
+        ],
+        b"\x82\xa0",
+    );
+    let mut vm = Machine::new(&script).unwrap();
+    let mut messages = MessageHost::default();
+    messages.set_record_output(true);
+    let mut scene = cmvs_rs::scene::SceneHost::default();
+    run_calls(&mut vm, &mut messages, 2);
+    messages.advance_auxiliary_motion(16, &mut scene).unwrap();
+    assert_eq!(messages.auxiliary_text(7).unwrap().glyphs[0].cell, 1);
+    run_calls(&mut vm, &mut messages, 2);
+    assert!(
+        messages
+            .advance_auxiliary_motion(16, &mut scene)
+            .unwrap_err()
+            .to_string()
+            .contains("overlaps")
+    );
+    let group = messages.auxiliary_text(7).unwrap();
+    assert_eq!(group.glyphs[0].cell, 1);
+    assert_eq!(group.glyphs[1].cell, 0);
+    run_calls(&mut vm, &mut messages, 2);
+    messages.advance_auxiliary_motion(16, &mut scene).unwrap();
+    // The cell number leaks through clear, but the deleted glyph no longer samples it.
+    assert_eq!(messages.auxiliary_text(7).unwrap().glyphs[0].cell, 2);
 }

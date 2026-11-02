@@ -128,7 +128,7 @@ release 探针，游戏根目录与字体同下方设置入口推进一节，`--
 
 实现 `0x22ff` 的其他显示器使用设置查询，证据见 [VM 语义](vm-semantics.md#0x22ff其他显示器使用设置查询2026-11-01)。保持档案状态与快照格式屏障，继续使用 `--allow-presumed --allow-unreviewed`。本轮不表示其他未复核命令获得语义验证，也未实现原版多显示器切换。
 
-release `cmvs-probe`，游戏根目录 `E:/Download/Purple Software/2015-04-24_CHRONOCLOCK`，字体 `C:/Windows/Fonts/msgothic.ttc`，`--checks P1,P2,P3,C1,C2,C3,C4 --max-steps 300000000`，默认鼠标、种子0、16ms，输出独立新目录 `local/chronoclock/other-display-probe`。七项全部通过：P1/P3/C1 为 L0，P2/C2/C3/C4 为 L1。页面图12节点、290次尝试、无重放偏离、未截断；标题设置入口越过旧 `intproc.ps3 / 0x8163a / 0x22ff` 停点。
+release `cmvs-probe`，游戏根目录 `<游戏目录>`，字体 `C:/Windows/Fonts/msgothic.ttc`，`--checks P1,P2,P3,C1,C2,C3,C4 --max-steps 300000000`，默认鼠标、种子0、16ms，输出独立新目录 `local/chronoclock/other-display-probe`。七项全部通过：P1/P3/C1 为 L0，P2/C2/C3/C4 为 L1。页面图12节点、290次尝试、无重放偏离、未截断；标题设置入口越过旧 `intproc.ps3 / 0x8163a / 0x22ff` 停点。
 
 C2 修改 `active_draw` 为 false，正常保存 `system.dat`、`cmvs.cfg` 后以新会话重启，值仍为 false；C3 修改文字速度后，前10个等待的帧数从1020变为1382；C4 再按同一控件恢复原设置。游戏目录只读，所有写入在探针用户目录。报告 `summary.json` SHA-256 `695942dd10a94ddd690e593c83c83c31c476c2768e1bd0b6cc831210d20470e4`；页面探针当前不记录事件，故 `events.jsonl` 为空，细节以报告为准。原生窗口、实际显示器切换、全剧情与剧情存读档不在本轮验证范围。
 
@@ -423,3 +423,11 @@ M3 已提交 `e5dfb8d`，本轮回到真实运行停点，不扩大契约框架�
 本轮日志 `local/chronoclock/probe-route-a.log` SHA-256 为 `21b0f2a0e694d0b68ce5f4590511230f9314c8197523da1d0fcaee3e092de921`；画面位于同目录的 `probe-route-a/final.png`。原游戏 `save/system.dat` 哈希仍为 `39a93d66c3020f95f6eca644d4e1a79c9318d0f8f53366a9b7a408f5b2fa5385`。这些本地证据不随仓库分发。
 
 下次优先调查 `scene/world_motion.rs` 对 `0x21fa` 插值模式的拒绝，先复核当前脚本参数与本作实现，再补所需行为。根据用户额度要求，本轮到此收束；尚未验证整条路线、所有选项、真实音轨、原生窗口输入或存读档完整度。
+
+## 2026-11-01：研究覆盖声明保护后的契约证书刷新
+
+为防止候选比较静默覆盖Aoitori显式研究实现，`profile_compare.py` 新增声明保留与身份核验。提取器依赖哈希因此从 `b3b938e165e71dca398298c092518ae2da0ec699992305816bc04dbe3ac3e4d3` 更新为 `b84a7ed5633bbe39dc6de43643303e1f5c68aa46302cb315553f31302bcbde65`，未放宽旧证书规则。
+
+使用原两侧exe、v3导出和相同context/mappings/summaries重新执行全部712条提取。`local/chronoclock/contract-research-declarations-report.json` SHA-256 `2c5c8778e265db783cfdb922f5f15cb0004d02878913bcf2eff143c32fb39119`；与 `contract-m2c-report.json` 递归逐字段比较只有 `rules.extractor_revision` 不同，29条equivalent/683条unknown、所有契约、原exe字节绑定、依赖与阻断内容均相同。
+
+候选登记器依据新完整报告对 `0x2008/0x2009/0x2087` 再提取并核对，通过后同步刷新三条证书及档案引用。目录SHA-256为 `40c0b072f0574c13ceff6e25e5fc34ffa681933ff3ac944d864c82a75562c17a`；无新增等价项、档案状态升级或默认放行范围变化。候选留在 `local/chronoclock/contract-research-declarations-candidate.json`。

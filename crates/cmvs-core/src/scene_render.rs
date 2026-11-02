@@ -10,6 +10,13 @@ use crate::{
 };
 
 pub enum Layer<'a> {
+    /// World-space inverse-view billboard: full texture, wrapped linear sampling,
+    /// alpha blending and no depth writes (original queue 5).
+    Billboard {
+        image: &'a ObjectImage,
+        quad: [f32; 4],
+        alpha: u32,
+    },
     Image {
         image: &'a ObjectImage,
         /// Source x/y/width/height.
@@ -185,22 +192,11 @@ fn image_layer<'a>(
     mask: Option<&'a MaskTransition>,
     inherited: Option<([f32; 2], [f32; 2])>,
 ) -> Result<Option<Layer<'a>>, FormatError> {
-    let [sx, sy, mut w, mut h] = [2, 3, 4, 5].map(|i| i64::from(words[i] as i16));
+    let [sx, sy, w, h] = [2, 3, 4, 5].map(|i| i64::from(words[i] as i16));
     if w <= 0 || h <= 0 || alpha <= 0 {
         return Ok(None);
     }
     let size = [image.pixels.width(), image.pixels.height()].map(i64::from);
-    if sx < 0 || sy < 0 {
-        return Err(FormatError("scene source rectangle outside image"));
-    }
-    // Mikage: アオイトリ's menu reads a 60-row strip at y 970 of a 1280x1024 sheet.
-    // The part past the right or bottom edge is drawn transparent; the top-left
-    // anchor, and so every corner the transforms below compute, stays the same.
-    w = w.min(size[0] - sx);
-    h = h.min(size[1] - sy);
-    if w <= 0 || h <= 0 {
-        return Ok(None);
-    }
     // The mask is the object's second texture; only the case where it covers the whole,
     // equally sized image texel for texel is modeled.
     if let Some(mask) = mask {
@@ -530,10 +526,6 @@ fn projected_layer<'a>(
     if alpha <= 0 || projection.scale <= 0.0 || w <= 0 || h <= 0 {
         return Ok(None);
     }
-    let size = [image.pixels.width(), image.pixels.height()].map(i64::from);
-    if sx < 0 || sy < 0 || sx + w > size[0] || sy + h > size[1] {
-        return Err(FormatError("scene source rectangle outside image"));
-    }
     let [px, py] = projection.position;
     // 0x140024020 scales the child's local corners about its own origin first.
     // 0x140020708 and 0x1400238a0 then subtract the parent origin/child position
@@ -776,16 +768,59 @@ pub fn prepare_scene<'a>(
     // Default forward queue traversal: common, previous, then current. Equal keys keep
     // this insertion order (0x14003de80 / 0x14003ddd0). Retained objects have no slot mask.
     let mut objects = Vec::new();
-    for (slot, object) in slots.chain(additional.iter().map(|&object| (None, object))) {
+    let particles = (0..4).flat_map(|slot| {
+        scene
+            .particle_effects()
+            .get(&slot)
+            .into_iter()
+            .flat_map(|effect| {
+                effect
+                    .particles
+                    .iter()
+                    .map(|particle| (None, &particle.object, Some(&effect.pool)))
+            })
+            .chain(
+                scene
+                    .collision_effects()
+                    .get(&slot)
+                    .into_iter()
+                    .flat_map(|effect| {
+                        effect
+                            .particles
+                            .iter()
+                            .map(|particle| (None, &particle.object, Some(&effect.pool)))
+                    }),
+            )
+            .chain(
+                scene
+                    .fragment_effects()
+                    .get(&slot)
+                    .into_iter()
+                    .filter(|effect| effect.pool.shown)
+                    .flat_map(|effect| {
+                        std::iter::once((None, &effect.pool, None)).chain(
+                            effect
+                                .fragments
+                                .iter()
+                                .map(|fragment| (None, &fragment.object, Some(&effect.pool))),
+                        )
+                    }),
+            )
+    });
+    let all_objects = slots
+        .map(|(slot, object)| (slot, object, None, false))
+        .chain(particles.map(|(slot, object, parent)| (slot, object, parent, false)))
+        .chain(additional.iter().map(|&object| (None, object, None, true)));
+    for (slot, object, parent, additional_object) in all_objects {
         if object.shown
             && let Some(change) = &object.change
         {
-            objects.push((None, change.common.as_ref(), slot.is_none()));
-            objects.push((None, change.previous.as_ref(), slot.is_none()));
+            objects.push((None, change.common.as_ref(), additional_object, None));
+            objects.push((None, change.previous.as_ref(), additional_object, None));
         }
-        objects.push((slot, object, slot.is_none()));
+        objects.push((slot, object, additional_object, parent));
     }
-    for (slot, object, additional_object) in objects {
+    for (slot, object, additional_object, parent) in objects {
         // 0x14003de80 returns early for +6244 == 0; no draw state means +6240 == 0.
         let Some(draw) = object.draw.as_ref().filter(|_| object.shown) else {
             continue;
@@ -801,7 +836,7 @@ pub fn prepare_scene<'a>(
         // glyphs as layer 1; 0x14003b420 applies it only with the top-level object's +6248
         // bit 0x100, children included.
         let by = match scene.quake() {
-            Some(quake) if object.flags & 0x100 != 0 => {
+            Some(quake) if parent.map_or(object.flags, |pool| pool.flags) & 0x100 != 0 => {
                 quake.offset(additional_object).map(i64::from)
             }
             _ => [0, 0],
@@ -815,7 +850,7 @@ pub fn prepare_scene<'a>(
                 if key.is_nan() || key <= 0.0 || d[0] == 3 && !camera.enabled() {
                     continue;
                 }
-                let layer = projected_layer(scene, Some(cameras), slot, object, draw, None)?
+                let layer = projected_layer(scene, Some(cameras), slot, object, draw, parent)?
                     .map(|(_, l)| shifted(l, by));
                 let mut entry = Entry {
                     order: key,
@@ -869,7 +904,11 @@ pub fn prepare_scene<'a>(
         check(d, false)?;
         let position = [d[8] as i32, d[9] as i32].map(i64::from);
         let mask = slot.and_then(|slot| scene.mask_on(slot));
-        let layer = match &object.image {
+        let layer = match object
+            .image
+            .as_ref()
+            .or_else(|| parent.and_then(|pool| pool.image.as_ref()))
+        {
             Some(image) => image_layer(
                 image,
                 d,
@@ -991,8 +1030,43 @@ pub fn prepare_scene<'a>(
     for queue in &mut projected {
         queue.sort_by(|a, b| b.order.total_cmp(&a.order));
     }
+    let mut world = Vec::new();
+    for effect in scene.falling_effects().values() {
+        let Some(image) = &effect.image else { continue };
+        let view = cameras
+            .ok_or(FormatError("world billboards need the device view"))?
+            .view(0)
+            .expect("view exists");
+        let eye = [view.words[0], view.words[1], view.words[2]].map(f32::from_bits);
+        for particle in &effect.particles {
+            if particle.opacity == 0 {
+                continue;
+            }
+            let position = particle.position();
+            let Some(quad) = view
+                .billboard(position, [0.1, 0.1], [width, height])
+                .map_err(FormatError)?
+            else {
+                continue;
+            };
+            let distance = ((position[1] - eye[1]).powi(2)
+                + (position[0] - eye[0]).powi(2)
+                + (position[2] - eye[2]).powi(2))
+            .sqrt();
+            world.push(Entry {
+                order: distance,
+                layer: Some(Layer::Billboard {
+                    image,
+                    quad,
+                    alpha: particle.opacity,
+                }),
+                children: Vec::new(),
+            });
+        }
+    }
+    world.sort_by(|a, b| b.order.total_cmp(&a.order));
     let mut commands = Vec::new();
-    for mut entry in projected.into_iter().flatten().chain(entries) {
+    for mut entry in projected.into_iter().flatten().chain(world).chain(entries) {
         entry.children.sort_by(|a, b| b.0.total_cmp(&a.0));
         let layers = entry
             .layer
@@ -1035,7 +1109,7 @@ fn put(target: &mut [u8], source: [u8; 3], alpha: u32, blend: Blend) {
 /// Pixels whose centers lie in [left, right) × [top, bottom) are covered. Texture tiling
 /// seams, power-of-two padding and the device's sub-texel precision are not modeled, so
 /// scaled output approximates the original; at unit scale on whole pixels it copies texels.
-fn draw_projected(
+fn draw_projected<const WRAP: bool>(
     pixels: &mut [u8],
     [width, height]: [u32; 2],
     image: &ObjectImage,
@@ -1058,7 +1132,7 @@ fn draw_projected(
         let ty = sy as f32 + (y as f32 - top) * step[1] - 0.5;
         for x in x0..x1 {
             let tx = sx as f32 + (x as f32 - left) * step[0] - 0.5;
-            let texel = bilinear(image, tx, ty);
+            let texel = bilinear_address::<WRAP>(image, tx, ty);
             let alpha = (u32::from(texel[3]) * opacity + 127) / 255;
             let dst = ((y * i64::from(width) + x) * 4) as usize;
             put(
@@ -1073,11 +1147,22 @@ fn draw_projected(
 
 /// Clamped bilinear sample at texel-space coordinates whose texel centers are integers.
 fn bilinear(image: &ObjectImage, tx: f32, ty: f32) -> [u8; 4] {
+    bilinear_address::<false>(image, tx, ty)
+}
+
+fn bilinear_address<const WRAP: bool>(image: &ObjectImage, tx: f32, ty: f32) -> [u8; 4] {
     let size = [image.pixels.width(), image.pixels.height()].map(i64::from);
     let texels = image.pixels.pixels();
     let [wx, wy] = [tx - tx.floor(), ty - ty.floor()];
-    let rows = [ty.floor() as i64, ty.floor() as i64 + 1].map(|r| r.clamp(0, size[1] - 1));
-    let cols = [tx.floor() as i64, tx.floor() as i64 + 1].map(|c| c.clamp(0, size[0] - 1));
+    let address = |index: i64, size: i64| {
+        if WRAP {
+            index.rem_euclid(size)
+        } else {
+            index.clamp(0, size - 1)
+        }
+    };
+    let rows = [ty.floor() as i64, ty.floor() as i64 + 1].map(|r| address(r, size[1]));
+    let cols = [tx.floor() as i64, tx.floor() as i64 + 1].map(|c| address(c, size[0]));
     let texel =
         |row: i64, col: i64, c: usize| f32::from(texels[((row * size[0] + col) * 4) as usize + c]);
     std::array::from_fn(|c| {
@@ -1210,6 +1295,23 @@ fn screen_mask<'a>(
 
 fn draw(pixels: &mut [u8], width: u32, height: u32, layer: Layer<'_>) {
     let (image, [sx, sy, w, h], [left, top], opacity, mask, screen_mask, blend) = match layer {
+        Layer::Billboard { image, quad, alpha } => {
+            draw_projected::<true>(
+                pixels,
+                [width, height],
+                image,
+                [
+                    0,
+                    0,
+                    i64::from(image.pixels.width()),
+                    i64::from(image.pixels.height()),
+                ],
+                quad,
+                alpha,
+                Blend::Alpha,
+            );
+            return;
+        }
         Layer::Image {
             image,
             rect,
@@ -1226,7 +1328,7 @@ fn draw(pixels: &mut [u8], width: u32, height: u32, layer: Layer<'_>) {
             alpha,
             blend,
         } => {
-            draw_projected(pixels, [width, height], image, rect, quad, alpha, blend);
+            draw_projected::<false>(pixels, [width, height], image, rect, quad, alpha, blend);
             return;
         }
         Layer::Rotated {
@@ -1273,8 +1375,11 @@ fn draw(pixels: &mut [u8], width: u32, height: u32, layer: Layer<'_>) {
     });
     for y in top.max(0)..(top + h).min(i64::from(height)) {
         for x in left.max(0)..(left + w).min(i64::from(width)) {
-            let src =
-                (((sy + y - top) * i64::from(image.pixels.width()) + sx + x - left) * 4) as usize;
+            // Scene queues set D3DTADDRESS_CLAMP. Preserve the quad and clamp its
+            // texture coordinates, including signed origins and oversized source rects.
+            let source_x = (sx + x - left).clamp(0, i64::from(image.pixels.width()) - 1);
+            let source_y = (sy + y - top).clamp(0, i64::from(image.pixels.height()) - 1);
+            let src = ((source_y * i64::from(image.pixels.width()) + source_x) * 4) as usize;
             let dst = ((y * i64::from(width) + x) * 4) as usize;
             let p = &image.pixels.pixels()[src..src + 4];
             let mut alpha = (u32::from(p[3]) * opacity + 127) / 255;
@@ -1294,7 +1399,147 @@ fn draw(pixels: &mut [u8], width: u32, height: u32, layer: Layer<'_>) {
 
 #[cfg(test)]
 mod scale_tests {
+    #[test]
+    fn world_billboard_sampling_wraps_both_texture_edges() {
+        let image = crate::scene::ObjectImage {
+            name: Vec::new(),
+            filter: None,
+            alpha: true,
+            surface: false,
+            pixels: crate::raster::RgbaImage::new(2, 1, vec![255, 0, 0, 255, 0, 0, 255, 255])
+                .unwrap(),
+        };
+        let mut pixels = vec![0; 4 * 2 * 4];
+        for pixel in pixels.as_chunks_mut::<4>().0 {
+            pixel[3] = 255;
+        }
+        super::draw(
+            &mut pixels,
+            4,
+            2,
+            super::Layer::Billboard {
+                image: &image,
+                quad: [0.0, 0.0, 4.0, 2.0],
+                alpha: 255,
+            },
+        );
+        for row in pixels.as_chunks::<16>().0 {
+            assert_eq!(
+                row,
+                &[
+                    128, 0, 128, 255, 255, 0, 0, 255, 128, 0, 128, 255, 0, 0, 255, 255
+                ]
+            );
+        }
+    }
+
     use super::*;
+
+    #[test]
+    fn source_rectangles_keep_their_extent_and_clamp_texels_on_every_edge() {
+        let colors = [
+            [255, 0, 0, 255],
+            [0, 255, 0, 255],
+            [0, 0, 255, 255],
+            [255, 255, 255, 255],
+        ];
+        let image = ObjectImage {
+            name: Vec::new(),
+            filter: None,
+            alpha: true,
+            surface: false,
+            pixels: RgbaImage::new(2, 2, colors.concat()).unwrap(),
+        };
+        for (rect, position, size, expected) in [
+            (
+                [-1, -1, 4, 4],
+                [0, 0],
+                [4, 4],
+                vec![0, 0, 1, 1, 0, 0, 1, 1, 2, 2, 3, 3, 2, 2, 3, 3],
+            ),
+            ([3, 3, 2, 2], [0, 0], [2, 2], vec![3; 4]),
+            ([-4, -4, 2, 2], [0, 0], [2, 2], vec![0; 4]),
+            ([-1, -1, 4, 4], [-1, -1], [2, 2], vec![0, 1, 2, 3]),
+        ] {
+            let mut draw = DrawState::default();
+            draw.words[2..6].copy_from_slice(&rect.map(|v| v as u32));
+            draw.words[8..10].copy_from_slice(&position.map(|v| v as u32));
+            let object = SceneObject {
+                image: Some(image.clone()),
+                draw: Some(draw),
+                ..Default::default()
+            };
+            let scene = SceneHost::default();
+            let frame = prepare_scene(&scene, None, &[&object], size[0], size[1]).unwrap();
+            let Layer::Image { rect: actual, .. } = &frame.commands()[0] else {
+                panic!("unscaled quad")
+            };
+            assert_eq!(*actual, rect.map(i64::from));
+            assert_eq!(
+                frame.render_cpu().unwrap().pixels(),
+                expected
+                    .into_iter()
+                    .flat_map(|i| colors[i])
+                    .collect::<Vec<_>>()
+            );
+        }
+    }
+
+    #[test]
+    fn transformed_source_rectangles_use_the_same_clamped_sampling() {
+        let image = ObjectImage {
+            name: Vec::new(),
+            filter: None,
+            alpha: true,
+            surface: false,
+            pixels: RgbaImage::new(
+                2,
+                2,
+                vec![
+                    255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255,
+                ],
+            )
+            .unwrap(),
+        };
+        let mut words = DrawState::default().words;
+        words[2..6].copy_from_slice(&[u32::MAX, u32::MAX, 4, 4]);
+        for (scale, rotation) in [(2.0f32, 0), (1.0, 36000)] {
+            words[18..20].fill(scale.to_bits());
+            words[20] = rotation;
+            let layer = image_layer(&image, &words, [0, 0], 255, None, None)
+                .unwrap()
+                .unwrap();
+            let side = (4.0 * scale) as u32;
+            let mut pixels = vec![0; (side * side * 4) as usize];
+            draw(&mut pixels, side, side, layer);
+            assert_eq!(&pixels[..3], &[255, 0, 0]);
+            assert_eq!(
+                &pixels[pixels.len() - 4..pixels.len() - 1],
+                &[255, 255, 255]
+            );
+        }
+        let mut cameras = CameraHost::default();
+        let mut record = cameras.saved(0);
+        record[14..18].copy_from_slice(&3u32.to_le_bytes());
+        cameras.restore(0, &record).unwrap();
+        words[0] = 2;
+        words[20] = 0;
+        words[13] = 20.0f32.to_bits();
+        words[15] = 20.0f32.to_bits();
+        let draw = DrawState {
+            words,
+            ..Default::default()
+        };
+        let object = SceneObject {
+            image: Some(image),
+            draw: Some(draw),
+            ..Default::default()
+        };
+        let scene = SceneHost::default();
+        let frame = prepare_scene(&scene, Some(&cameras), &[&object], 1024, 612).unwrap();
+        assert_eq!(frame.commands().len(), 1);
+        frame.render_cpu().unwrap();
+    }
 
     fn image() -> ObjectImage {
         ObjectImage {

@@ -25,7 +25,10 @@ const AHEAD: usize = 4096;
 
 /// A mixer for the engine and its source for [`AudioOutput`].
 pub fn mixer() -> (Mixer, MixerSource) {
-    rodio::mixer::mixer(CHANNELS, SAMPLE_RATE)
+    rodio::mixer::mixer(
+        std::num::NonZero::new(CHANNELS).expect("non-zero"),
+        std::num::NonZero::new(SAMPLE_RATE).expect("non-zero"),
+    )
 }
 
 /// The feeder thread and the ring's reading end.

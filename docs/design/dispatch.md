@@ -1,5 +1,9 @@
 # 系统命令分派层设计草案
 
+当前实现的简要入口见[分派开发指南](../guides/dispatch.md)；本文保留设计与迁移历史。
+
+当前研究覆盖选择已改为档案中的显式声明及架构/原exe SHA-256/证据文档绑定，不再按档案ID和命令列表硬编码。该机制仅用于Unreviewed研究运行；正式Variant状态、默认放行证据及完整架构验收仍未完成，实施记录见[Aoitori研究记录](../games/aoitori/research.md)。
+
 > 状态：**M1、M2 已实现；M3 已知491条命令均已进入根表，完整架构验收尚未完成**（2026-11-01；M1结果见第9节，M2审计见第10节，共享入口起点见第11节，服务/元数据切片见第12、13节，等待切片见第14节，音频与错误通道见第15节，图像资源切片见第16节，场景/相机整组迁移见第17节，输入/按钮批次见第18节，消息窗口批次见第19节，文字状态及绑定批次见第20节，quake/strip批次见第21节，序列/影片批次见第22节，环境命令批次见第23节，脚本/存档服务批次见第24节，运行时/等待收口见第25节）。M3完整接口在实施前再确认。档案、证据状态与闸门的来历见[引擎档案层设计](engine-profiles.md)，本文不重复。
 
 2026-11-01增量试点：Aoitori接入暴露真实文字布局差异，先迁移涉及的文字切片。`CommandGate::resolve`先执行闸门，再返回`Root`或显式研究语义及首次放行通知；`dispatch::ROOT`登记6个根入口，`FONT_CELLS`有8个稀疏研究覆盖。runner/trace共享`run_text`，选中覆盖后不能退回根；分派入口不读取构建ID，宿主不接触档案。新增处理器使用`Call`和`Flow`，公共命令包装只共享不变流程，差异算法独立。证据仍为Unreviewed，必须研究放行；这不是正式M4的可默认放行Variant，也不表示全部M2/M3完成。其余责任链与完整归属审计继续按本文推进，详见[Aoitori记录](../games/aoitori/research.md)。
@@ -219,7 +223,7 @@ trace 的计时器与消息标志仍受原 `--record-platform` 资源条件控�
 
 从 `9ea501a` 的 Git archive 单独构建旧 `cmvs-trace`，与当前版本进行只读比较：计时器、消息标志、随机数、未知查询字四组脚本，各配记录开关、随机种子、帧时钟开关，共32组，退出码、stdout、stderr逐字节一致。日志及结果在忽略目录 `target/dispatch-trace-*`，不把测试数据或构建产物纳入Git。
 
-《アマツツミ》同参数启动trace的迁移前后日志均13,853字节，SHA-256 `43876cb9c68f6d199f6c094432ba8648383cf4de47cb28b2f082381b55e1aa72`，退出码均0，仍在既有 `0x22b3` 停止。参数为 `start.ps3 --script-archive script.cpz --record-platform <root> --bootstrap --continue-without-snapshot --frame-ms 16 --rand-seed 0 --steps 1000000`；本轮路径使用 `E:/Download/AMATSUTSUMI`，与旧记录的反斜杠路径文本不同，因此不与其日志哈希混用。预算100万步，但没有执行满，不记为百万步覆盖。
+《アマツツミ》同参数启动trace的迁移前后日志均13,853字节，SHA-256 `43876cb9c68f6d199f6c094432ba8648383cf4de47cb28b2f082381b55e1aa72`，退出码均0，仍在既有 `0x22b3` 停止。参数为 `start.ps3 --script-archive script.cpz --record-platform <root> --bootstrap --continue-without-snapshot --frame-ms 16 --rand-seed 0 --steps 1000000`；本轮路径使用 `<游戏目录>`，与旧记录的反斜杠路径文本不同，因此不与其日志哈希混用。预算100万步，但没有执行满，不记为百万步覆盖。
 
 Aoitori继续使用显式 `--allow-presumed --allow-unreviewed`，`local/aoitori/shared-dispatch` 的 R1/L0、D1/L1 通过：仍为22,050步、624帧、标题5按钮；两次启动轨迹 SHA-256 均为 `0dbfaffb34467faad1660eab21c816918a5317731187f9f945ef3ec8a480bb51`，状态 SHA-256 均为 `cd76f046f60f381a29a1bf8cd188aa95a162907a973dc13c008dfde03eb9ce46`，与迁移前相同。本轮未重跑R2，不据此推进ruby停点或提升证据状态。
 

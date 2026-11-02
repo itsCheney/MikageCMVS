@@ -10,9 +10,14 @@ use support::bytecode::{command, pending, script};
 
 #[test]
 fn migrated_tables_have_unique_owners_and_overrides_are_build_bound() {
-    for table in [dispatch::ROOT, dispatch::FONT_CELLS] {
+    for table in std::iter::once(dispatch::ROOT).chain(dispatch::RESEARCH_TABLES.iter().copied()) {
         let owners: std::collections::BTreeSet<_> = table.iter().map(|e| e.command).collect();
         assert_eq!(owners.len(), table.len());
+        for entry in table {
+            if entry.capability == dispatch::Capability::ParticleImages {
+                assert!(dispatch::uses_images(entry.command));
+            }
+        }
     }
     let registry = Registry::builtin();
     for id in ["cmvs-20160201", "cmvs-20150405"] {
@@ -25,7 +30,7 @@ fn migrated_tables_have_unique_owners_and_overrides_are_build_bound() {
     for entry in dispatch::FONT_CELLS {
         assert_eq!(
             derived.semantics(entry.command),
-            cmvs_rs::profile::Semantics::ResearchFontCells
+            cmvs_rs::profile::Semantics::Research(cmvs_rs::profile::ResearchId::FontCells)
         );
         assert_eq!(
             derived.status(entry.command),
@@ -71,9 +76,10 @@ fn new_command_still_requires_research_gate_and_short_stack_is_transactional() {
         )
         .unwrap();
     let mut gate = CommandGate::new(selection);
+    gate.set_block_unreviewed(true);
     let (pc, command) = vm.pending_system().unwrap();
     assert!(gate.check(&vm, pc, command).is_err());
-    gate.set_allow_unreviewed(true);
+    gate.set_block_unreviewed(false);
     assert_eq!(gate.check(&vm, pc, command).unwrap(), Some(0x3ac));
     let mut messages = MessageHost::default();
     let mut input = ActionInput::default();
@@ -141,7 +147,12 @@ fn state_entries_preserve_missing_capabilities_and_execute_once_when_available()
         };
         // An explicitly selected semantic source cannot fall back to these root entries.
         assert_eq!(
-            dispatch::run(Semantics::ResearchFontCells, &mut vm, &mut hosts).unwrap(),
+            dispatch::run(
+                Semantics::Research(cmvs_rs::profile::ResearchId::FontCells),
+                &mut vm,
+                &mut hosts
+            )
+            .unwrap(),
             Some(Flow::Unhandled)
         );
         assert_eq!((vm.pc(), vm.stack().len_bytes()), before);
