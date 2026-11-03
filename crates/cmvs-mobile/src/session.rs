@@ -153,7 +153,7 @@ impl Session {
         // leaked rather than made self-referential.
         let start = match patch
             .as_ref()
-            .map(|p| p.script(b"start.ps3"))
+            .map(|p| p.script(&selection.game.files.start_name()))
             .transpose()?
             .flatten()
         {
