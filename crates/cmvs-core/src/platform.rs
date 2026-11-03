@@ -76,6 +76,8 @@ impl PlatformAssets for DirectoryAssets {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PlatformRequest {
     Fullscreen(bool),
+    /// Fullscreen display preference: 0 primary, 1..4 explicit, 5 follows window.
+    FullscreenMonitor(u32),
     AspectMode(u32),
     /// Active display's scaling enable (+172). In fullscreen, refresh presentation
     /// resources before acknowledging; keep the saved windowed client size intact.
@@ -95,7 +97,26 @@ pub enum PlatformRequest {
         bytes: Arc<Vec<u8>>,
     },
 }
+pub enum FontDialogResult {
+    Pending,
+    Cancelled,
+    Selected(Vec<u8>),
+}
+
 pub trait PlatformBackend {
+    /// Select a fullscreen target; return whether the selected display changed.
+    /// Mode 5 must return true even when the current target is unchanged.
+    fn select_fullscreen_monitor(&mut self, _mode: u32) -> Result<bool, Box<dyn Error>> {
+        Err("platform backend does not implement fullscreen monitor selection".into())
+    }
+
+    /// Number of available host displays; recording backends expose one virtual display.
+    fn display_count(&self) -> Result<u32, Box<dyn Error>> {
+        Err("platform backend does not implement display count queries".into())
+    }
+    fn logical_size(&self) -> [u32; 2] {
+        crate::viewport::ScreenSize::default().pixels()
+    }
     /// Read the latest completed engine frame in device/script pixels, including
     /// fonts and movies. Do not redraw current VM state or reuse a held 0x2304 capture.
     /// Absence of a completed frame is an error, not a black/empty fabricated image.
@@ -115,11 +136,11 @@ pub trait PlatformBackend {
         if !self.resizable()? {
             return Ok(false);
         }
-        if self.windowed_size()? == [1280, 720] {
+        if self.windowed_size()? == self.logical_size() {
             return Ok(false);
         }
         let fullscreen = self.fullscreen()?;
-        self.apply(&PlatformRequest::WindowSize([1280, 720]))?;
+        self.apply(&PlatformRequest::WindowSize(self.logical_size()))?;
         Ok(!fullscreen)
     }
     /// 0x2163 queries the device's current display mode, not the startup preference.
@@ -150,6 +171,14 @@ pub trait PlatformBackend {
     fn choose_font(&mut self, _current: &[u8]) -> Result<Option<Vec<u8>>, Box<dyn Error>> {
         Err("platform backend does not implement the font dialog".into())
     }
+    /// Mobile dialogs complete asynchronously while the host processes lifecycle
+    /// events. Synchronous desktop dialogs keep the existing choose_font path.
+    fn poll_font_dialog(&mut self, current: &[u8]) -> Result<FontDialogResult, Box<dyn Error>> {
+        Ok(match self.choose_font(current)? {
+            Some(face) => FontDialogResult::Selected(face),
+            None => FontDialogResult::Cancelled,
+        })
+    }
     /// 0=unscaled when it fits, 1=contain, 2=cover, 3=stretch (0x14001a360).
     fn aspect_mode(&self) -> Result<u32, Box<dyn Error>> {
         Err("platform backend does not implement aspect mode queries".into())
@@ -178,6 +207,7 @@ pub fn supported_render_mode(
 }
 #[derive(Default)]
 pub struct RecordingBackend {
+    screen_size: crate::viewport::ScreenSize,
     requests: Vec<PlatformRequest>,
     bytes: usize,
     fullscreen: bool,
@@ -190,6 +220,9 @@ pub struct RecordingBackend {
     font_dialogs: Vec<Vec<u8>>,
 }
 impl RecordingBackend {
+    pub fn set_screen_size(&mut self, size: crate::viewport::ScreenSize) {
+        self.screen_size = size;
+    }
     /// Explicit software device draw boundary. Frame producers must publish the
     /// complete engine canvas after drawing; VM commands do not update it.
     pub fn present_frame(&mut self, frame: crate::raster::RgbaImage) {
@@ -208,6 +241,18 @@ impl RecordingBackend {
     }
 }
 impl PlatformBackend for RecordingBackend {
+    fn select_fullscreen_monitor(&mut self, mode: u32) -> Result<bool, Box<dyn Error>> {
+        self.apply(&PlatformRequest::FullscreenMonitor(mode))?;
+        // One virtual display: every supported mode resolves to the same target.
+        Ok(mode == 5)
+    }
+
+    fn display_count(&self) -> Result<u32, Box<dyn Error>> {
+        Ok(1)
+    }
+    fn logical_size(&self) -> [u32; 2] {
+        self.screen_size.pixels()
+    }
     fn read_device_frame(&mut self) -> Result<crate::raster::RgbaImage, Box<dyn Error>> {
         self.device_frame
             .clone()
@@ -255,8 +300,11 @@ impl PlatformBackend for RecordingBackend {
         Ok(self.fullscreen)
     }
     fn apply(&mut self, request: &PlatformRequest) -> Result<(), Box<dyn Error>> {
-        if matches!(request, PlatformRequest::WindowSize(size) if *size != [1280, 720]) {
-            return Err("unsupported window size request".into());
+        if matches!(request, PlatformRequest::FullscreenMonitor(mode) if *mode > 5) {
+            return Err("unsupported fullscreen monitor mode".into());
+        }
+        if let PlatformRequest::WindowSize(size) = request {
+            crate::viewport::ScreenSize::new(*size)?;
         }
         if matches!(request, PlatformRequest::AspectMode(mode) if *mode > 3) {
             return Err("invalid aspect mode".into());
@@ -265,7 +313,8 @@ impl PlatformBackend for RecordingBackend {
             return Err("unsupported render mode".into());
         }
         let size = match request {
-            PlatformRequest::Fullscreen(_)
+            PlatformRequest::FullscreenMonitor(_)
+            | PlatformRequest::Fullscreen(_)
             | PlatformRequest::AspectMode(_)
             | PlatformRequest::AspectScaling(_)
             | PlatformRequest::RenderMode(_)
@@ -351,11 +400,21 @@ pub struct PlatformHost {
     thumbnail: Option<ThumbnailConfig>,
     /// CHRONOCLOCK device +144, initialized from WINDOW_RESOLVING.
     others_display_use: bool,
+    fullscreen_monitor_mode: u32,
+    fullscreen_monitor_initialized: bool,
 }
 impl PlatformHost {
+    pub fn fullscreen_monitor_mode(&self) -> u32 {
+        self.fullscreen_monitor_mode
+    }
+
     pub fn configure_display_selection(&mut self, ini: &[u8]) {
         self.others_display_use =
             crate::save_menu::profile_int(ini, "WINDOW_RESOLVING", "OTHERS_DISPLAY_USE", 0) != 0;
+        self.fullscreen_monitor_mode =
+            crate::save_menu::profile_int(ini, "WINDOW_RESOLVING", "FULL_SCREEN_MONITOR_MODE", 0)
+                as u32;
+        self.fullscreen_monitor_initialized = false;
     }
     pub fn title(&self) -> Option<&[u8]> {
         self.title.as_deref()
@@ -422,6 +481,61 @@ impl PlatformHost {
         cursors: &[Vec<u8>],
     ) -> Result<PlatformEvent, Box<dyn Error>> {
         let (pc, command) = (call.pc, call.command);
+        if command == 0x3c6 {
+            let raw = call.argument(4, "fullscreen monitor mode")?;
+            if raw > 5 {
+                return Err("unsupported fullscreen monitor mode".into());
+            }
+            let mode = if (1..=4).contains(&raw) && backend.display_count()? < raw {
+                0
+            } else {
+                raw
+            };
+            // Read fallible state before applying the request, so retry keeps host and VM intact.
+            let fullscreen = backend.fullscreen()?;
+            let changed = backend.select_fullscreen_monitor(mode)?;
+            let yield_frame = changed && fullscreen;
+            call.complete(if yield_frame { 0xc004 } else { 0x4004 })?;
+            self.fullscreen_monitor_mode = mode;
+            self.fullscreen_monitor_initialized = true;
+            return Ok(if yield_frame {
+                PlatformEvent::Yield
+            } else {
+                PlatformEvent::Configured
+            });
+        }
+        if command == 0x3c5 {
+            // REALIVE device +148: mode 0=primary, 1..4=explicit, 5=window monitor.
+            let mode = self.fullscreen_monitor_mode;
+            if mode > 5 {
+                return Err("unsupported fullscreen monitor mode".into());
+            }
+            let mode = if !self.fullscreen_monitor_initialized
+                && (1..=4).contains(&mode)
+                && backend.display_count()? < mode
+            {
+                0
+            } else {
+                mode
+            };
+            call.complete(0x4000)?;
+            self.fullscreen_monitor_mode = mode;
+            self.fullscreen_monitor_initialized = true;
+            call.vm
+                .state_mut()
+                .set_system_integer(0, mode)
+                .expect("slot 0 exists");
+            return Ok(PlatformEvent::Configured);
+        }
+        if command == 0x3c7 {
+            let count = backend.display_count()?;
+            call.complete(0x4000)?;
+            call.vm
+                .state_mut()
+                .set_system_integer(0, count)
+                .expect("slot 0 exists");
+            return Ok(PlatformEvent::Configured);
+        }
         if command == 0x2ff {
             // 0x140078400 -> device +144: preference, not monitor availability.
             call.complete(0x4000)?;
@@ -633,7 +747,8 @@ impl PlatformHost {
             PlatformRequest::Title(bytes) => self.title = Some(bytes),
             PlatformRequest::Cursor { id, .. } => self.cursor = id,
             PlatformRequest::Icon { name, .. } => self.icon = Some(name),
-            PlatformRequest::Fullscreen(_)
+            PlatformRequest::FullscreenMonitor(_)
+            | PlatformRequest::Fullscreen(_)
             | PlatformRequest::AspectMode(_)
             | PlatformRequest::AspectScaling(_)
             | PlatformRequest::RenderMode(_)

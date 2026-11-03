@@ -1,5 +1,6 @@
 //! Font-cell text semantics, independently selected by the dispatch table.
-//! Evidence is bound to cmvs-20171114 in docs/games/aoitori/vm-semantics.md.
+//! Executable-bound profile declarations select the inspected command subset;
+//! each binding points to its game evidence under docs/games/.
 use super::{
     MessageHost, TextObject,
     auxiliary::{AuxiliaryGlyph, AuxiliaryText},
@@ -515,6 +516,7 @@ impl AuxiliaryText {
         };
         let template = AuxiliaryGlyph {
             face: self.face.clone(),
+            revision_alpha: self.revision_alpha,
             code: 0,
             position: [0, 0],
             size,
@@ -722,6 +724,35 @@ pub(crate) fn set_mode(
     let raw = call.argument(4, "enabled")?;
     call.complete(0x4004)?;
     hosts.messages.font_cells.proportional = raw != 0;
+    Ok(Flow::Done)
+}
+pub(crate) fn auxiliary_face(
+    hosts: &mut TextHosts<'_>,
+    call: &mut Call<'_, '_>,
+) -> Result<Flow, DecodeError> {
+    let slot = call.argument(4, "auxiliary slot")? as usize;
+    let raw = call.argument(8, "font face")?;
+    let bytes = call.vm.resolve_string(raw)?;
+    let host = &mut hosts.messages;
+    if host.auxiliary_text(slot).is_none() {
+        return Err(call.error("font selection needs an existing auxiliary text group"));
+    }
+    // The native group's inline face occupies +60..+123; reject overflow.
+    if bytes.len() >= 64 {
+        return Err(call.error("auxiliary font face exceeds 63 bytes"));
+    }
+    let face = if bytes.is_empty() {
+        host.default_face()
+    } else {
+        bytes.into()
+    };
+    call.complete(0x4008)?;
+    host.auxiliary_font_faces[slot] = Some(face.clone());
+    host.auxiliary_texts[slot]
+        .as_mut()
+        .expect("validated group")
+        .face = face;
+    // Glyph records and atlas cells retain the font used when they were generated.
     Ok(Flow::Done)
 }
 pub(crate) fn measure_text(

@@ -163,6 +163,8 @@ impl Session {
         let script: &'static _ = Box::leak(Box::new(start));
         let mut startup = Startup::new(script, &root, &selection.game, 0)?;
         startup.set_patch(patch);
+        // MGV1 movies (Ogg/Theora), decoded by the desktop host's pure-Rust decoder.
+        startup.set_mgv_factory(Box::new(crate::video::TheoraFactory));
         // The gate runs presumed and unreviewed commands unless told to block them
         // (upstream's --block-* research switches); a player never blocks, recorded
         // game or not.

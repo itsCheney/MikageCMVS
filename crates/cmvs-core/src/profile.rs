@@ -33,32 +33,53 @@ pub enum Semantics {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VariantId {
     FontCells,
+    TextAlpha,
+    ObjectQueue,
+    ListSelect,
     Particles,
     BackgroundAudio,
     FallingBillboards,
     CollisionParticles,
     Fragments,
+    KeyedArchives,
+    DisplayCount,
+    FullscreenMonitor,
+    MgvPlayer,
 }
 impl VariantId {
     pub fn parse(name: &str) -> Option<Self> {
         match name {
+            "list-select" => Some(Self::ListSelect),
+            "object-queue" => Some(Self::ObjectQueue),
+            "text-alpha" => Some(Self::TextAlpha),
             "font-cells" => Some(Self::FontCells),
             "particles" => Some(Self::Particles),
             "background-audio" => Some(Self::BackgroundAudio),
             "falling-billboards" => Some(Self::FallingBillboards),
             "collision-particles" => Some(Self::CollisionParticles),
             "fragments" => Some(Self::Fragments),
+            "keyed-archives" => Some(Self::KeyedArchives),
+            "display-count" => Some(Self::DisplayCount),
+            "fullscreen-monitor" => Some(Self::FullscreenMonitor),
+            "mgv-player" => Some(Self::MgvPlayer),
             _ => None,
         }
     }
     pub fn name(self) -> &'static str {
         match self {
+            Self::ListSelect => "list-select",
+            Self::ObjectQueue => "object-queue",
+            Self::TextAlpha => "text-alpha",
             Self::FontCells => "font-cells",
             Self::Particles => "particles",
             Self::BackgroundAudio => "background-audio",
             Self::FallingBillboards => "falling-billboards",
             Self::CollisionParticles => "collision-particles",
             Self::Fragments => "fragments",
+            Self::KeyedArchives => "keyed-archives",
+            Self::DisplayCount => "display-count",
+            Self::FullscreenMonitor => "fullscreen-monitor",
+            Self::MgvPlayer => "mgv-player",
         }
     }
 }
@@ -430,12 +451,14 @@ pub struct Registry {
     contracts: BTreeMap<[u8; 32], ContractProof>,
 }
 
-const BUILTIN_PROFILES: [&str; 6] = [
-    include_str!("../profiles/cmvs-20160201.profile"),
-    include_str!("../profiles/cmvs-20150405.profile"),
-    include_str!("../profiles/cmvs-20171114.profile"),
+const BUILTIN_PROFILES: [&str; 8] = [
+    include_str!("../profiles/cmvs-20110525.profile"),
     include_str!("../profiles/cmvs-20130131.profile"),
     include_str!("../profiles/cmvs-20140217.profile"),
+    include_str!("../profiles/cmvs-20150405.profile"),
+    include_str!("../profiles/cmvs-20160201.profile"),
+    include_str!("../profiles/cmvs-20171114.profile"),
+    include_str!("../profiles/cmvs-20190305.profile"),
     include_str!("../profiles/cmvs-20171129.profile"),
 ];
 const BUILTIN_GAMES: &str = include_str!("../profiles/games.txt");

@@ -5,7 +5,7 @@ use ab_glyph::{Font, FontVec, ScaleFont, point};
 use cmvs_core::{
     FormatError,
     camera::CameraHost,
-    message::{AUXILIARY_TEXTS, MESSAGE_WINDOWS, MessageHost, RecordedGlyph, TEXT_OBJECTS},
+    message::{AUXILIARY_TEXTS, MessageHost, RecordedGlyph, TEXT_OBJECTS},
     raster::RgbaImage,
     scene::{DrawState, ObjectImage, SceneHost, SceneObject},
     scene_render,
@@ -27,7 +27,7 @@ const MAX_FONT: usize = 128 * 1024 * 1024;
 /// face; faces named by glyphs are resolved through `FontLibrary`.
 pub struct FontRenderer {
     library: Arc<Mutex<FontLibrary>>,
-    cache: BTreeMap<(Arc<[u8]>, [u32; 8]), RgbaImage>,
+    cache: BTreeMap<(Arc<[u8]>, [u32; 9]), RgbaImage>,
 }
 
 struct PreviewMetrics(Arc<Mutex<FontLibrary>>);
@@ -138,6 +138,15 @@ pub(crate) fn game_encoding() -> &'static encoding_rs::Encoding {
 fn rgb(color: u32) -> [u8; 3] {
     let [b, g, r, _] = color.to_le_bytes();
     [r, g, b]
+}
+
+// GGO_GRAY4_BITMAP coverage curve from 0x14006b4e0. Portable coverage
+// is quantized to the native table's 17 levels; raster shapes remain backend-specific.
+fn revise_alpha(alpha: u8) -> u8 {
+    const TABLE: [u8; 17] = [
+        0, 31, 60, 87, 112, 135, 156, 175, 192, 207, 220, 231, 240, 247, 252, 254, 255,
+    ];
+    TABLE[(usize::from(alpha) * 16 + 127) / 255]
 }
 
 /// Preview weight synthesis: extend ink by one pixel to the right before painting
@@ -281,6 +290,41 @@ impl FontRenderer {
         library.face(&face)?;
         Ok(face)
     }
+    pub fn import_font(&self, path: &Path, index: u32) -> Result<Vec<u8>, Box<dyn Error>> {
+        let mut bytes = Vec::new();
+        File::open(path)?
+            .take(MAX_FONT as u64 + 1)
+            .read_to_end(&mut bytes)?;
+        let name = crate::font_library::family_names(path)?
+            .into_iter()
+            .find(|(face, _)| *face == index)
+            .and_then(|(_, names)| {
+                names.into_iter().find_map(|name| {
+                    if name.chars().any(char::is_control) {
+                        return None;
+                    }
+                    let (encoded, _, unmappable) = encoding_rs::SHIFT_JIS.encode(&name);
+                    (!unmappable
+                        && !encoded.is_empty()
+                        && encoded.len() <= 31
+                        && !encoded.contains(&0)
+                        && !encoded.starts_with(b"CMVS-F-")
+                        && !encoded.starts_with(b"CMVS-U-"))
+                    .then(|| encoded.into_owned())
+                })
+            });
+        let mut library = self
+            .library
+            .lock()
+            .map_err(|_| FormatError("font library lock poisoned"))?;
+        let key = library.import_file(bytes, index)?;
+        if let Some(name) = name {
+            library.name_imported_font(&name, &key)?;
+            Ok(name)
+        } else {
+            Ok(key)
+        }
+    }
     fn font(&self, face: &[u8], ch: char) -> Result<Arc<FontVec>, FormatError> {
         self.library
             .lock()
@@ -306,6 +350,7 @@ impl FontRenderer {
             glyph.outline[0],
             glyph.outline[1],
             u32::from(glyph.bold),
+            u32::from(glyph.revision_alpha),
         ];
         let key = (glyph.face.clone(), key);
         if let Some(image) = self.cache.get(&key) {
@@ -342,6 +387,11 @@ impl FontRenderer {
                 "selected font lacks a supported outline for a character",
             ));
         }
+        if glyph.revision_alpha {
+            for alpha in &mut mask {
+                *alpha = revise_alpha(*alpha);
+            }
+        }
         if glyph.bold {
             embolden(&mut mask, side);
         }
@@ -354,7 +404,7 @@ impl FontRenderer {
     }
 
     /// Adds glyph images and visible message-window objects to the core's layer queue.
-    /// Current layout uses the 1280x720 research viewport and finite nonnegative text scale.
+    /// Text coordinates match the logical device canvas; scales must be finite and nonnegative.
     pub fn render(
         &mut self,
         scene: &SceneHost,
@@ -363,13 +413,11 @@ impl FontRenderer {
     ) -> Result<RgbaImage, FormatError> {
         let objects = self.prepare_objects(messages)?;
         let mut additional: Vec<_> = objects.iter().collect();
-        additional.extend(
-            (0..MESSAGE_WINDOWS)
-                .filter_map(|i| messages.window(i))
-                .filter(|w| w.visible && !w.hidden)
-                .map(|w| &w.object),
-        );
-        scene_render::render_scene(scene, Some(cameras), &additional, 1280, 720)
+        additional.extend(messages.visible_window_objects());
+        {
+            let [width, height] = messages.screen_size();
+            scene_render::render_scene(scene, Some(cameras), &additional, width, height)
+        }
     }
 
     /// Builds glyph objects without compositing a frame.
@@ -384,9 +432,9 @@ impl FontRenderer {
             .filter_map(|i| messages.text(i))
             .filter(|t| t.visible && !t.glyphs.is_empty())
         {
-            if text.logical_size != [1280, 720] {
+            if text.logical_size != messages.screen_size().map(|v| v as i32) {
                 return Err(FormatError(
-                    "font preview requires 1280x720 text coordinates",
+                    "font preview requires text coordinates matching the logical screen",
                 ));
             }
             let scale = f32::from_bits(text.scale_bits);
@@ -462,6 +510,7 @@ impl FontRenderer {
                     snapshot_indices: None,
                     face: glyph.face.clone(),
                     bold: false,
+                    revision_alpha: glyph.revision_alpha,
                     code: glyph.code,
                     position: glyph.position,
                     size: glyph.size,
@@ -517,6 +566,7 @@ mod tests {
             snapshot_indices: None,
             face: Arc::from(cmvs_core::settings::DEFAULT_FONT_FACE),
             bold: false,
+            revision_alpha: false,
             code: 0x82a0,
             position: [0, 0],
             size: 27,
@@ -554,9 +604,14 @@ mod tests {
         {
             assert!(after[3] >= before[3]);
         }
+        glyph.revision_alpha = true;
+        let revised = font.glyph(&glyph).unwrap();
+        assert!(ink(&revised) > ink(&bold));
+        glyph.revision_alpha = false;
+        assert_eq!(font.glyph(&glyph).unwrap(), bold);
         glyph.bold = false;
         assert_eq!(font.glyph(&glyph).unwrap(), normal);
-        assert_eq!(font.cache.len(), 2);
+        assert_eq!(font.cache.len(), 3);
         let metrics = font.metrics();
         let face = cmvs_core::settings::DEFAULT_FONT_FACE;
         let width = metrics.ink_width(face, 65, 27).unwrap();
@@ -573,6 +628,16 @@ mod tests {
             metrics.ink_width(&glyph.face, glyph.code, glyph.size),
             metrics.ink_width(face, glyph.code, glyph.size)
         );
+    }
+    #[test]
+    fn alpha_revision_preserves_endpoints_and_increases_partial_coverage() {
+        assert_eq!(revise_alpha(0), 0);
+        assert_eq!(revise_alpha(255), 255);
+        assert_eq!(revise_alpha(128), 192);
+        for level in 1..16 {
+            let alpha = (level * 255 / 16) as u8;
+            assert!(revise_alpha(alpha) > alpha);
+        }
     }
     #[test]
     fn bold_mask_extends_ink_once_without_crossing_rows() {

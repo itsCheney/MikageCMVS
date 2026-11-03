@@ -149,6 +149,10 @@ pub enum RuntimeOperation {
         first: u32,
         second: u32,
     },
+    SetSlotInfo {
+        slot: u32,
+        values: [u32; 2],
+    },
     Thumbnail,
     LatestSlot {
         start: i32,
@@ -971,19 +975,28 @@ fn root_drag_press(hosts: &mut Hosts<'_>, call: &mut Call<'_, '_>) -> Result<Flo
     Ok(Flow::Done)
 }
 
+fn input_capability(capability: Capability) -> bool {
+    matches!(
+        capability,
+        Capability::Input
+            | Capability::ButtonInput
+            | Capability::ListInput
+            | Capability::DragPress
+            | Capability::WindowPointer
+            | Capability::WindowButtons
+    )
+}
 pub fn uses_input(command: u16) -> bool {
-    ROOT.iter().any(|entry| {
-        entry.command == command
-            && matches!(
-                entry.capability,
-                Capability::Input
-                    | Capability::ButtonInput
-                    | Capability::ListInput
-                    | Capability::DragPress
-                    | Capability::WindowPointer
-                    | Capability::WindowButtons
-            )
-    })
+    ROOT.iter()
+        .any(|entry| entry.command == command && input_capability(entry.capability))
+}
+pub fn uses_input_for(semantics: Semantics, command: u16) -> bool {
+    match semantics {
+        Semantics::Root => uses_input(command),
+        Semantics::Variant(id) => {
+            variant_entry(id, command).is_some_and(|entry| input_capability(entry.capability))
+        }
+    }
 }
 
 fn root_runtime(_hosts: &mut Hosts<'_>, call: &mut Call<'_, '_>) -> Result<Flow, Box<dyn Error>> {
@@ -1011,6 +1024,16 @@ fn root_runtime(_hosts: &mut Hosts<'_>, call: &mut Call<'_, '_>) -> Result<Flow,
             8,
         ),
         0x2b8 => (Thumbnail, 0),
+        0x2be => (
+            SetSlotInfo {
+                slot: call.argument(4, "save slot")?,
+                values: [
+                    call.argument(8, "first metadata word")?,
+                    call.argument(12, "second metadata word")?,
+                ],
+            },
+            12,
+        ),
         0x2b7 => (
             LatestSlot {
                 start: call.argument(4, "first slot")? as i32,
@@ -1180,7 +1203,12 @@ fn root_font_dialog(
         .device_frame
         .as_deref_mut()
         .expect("font backend checked")
-        .choose_font(settings.font_face())?;
+        .poll_font_dialog(settings.font_face())?;
+    let chosen = match chosen {
+        crate::platform::FontDialogResult::Pending => return Ok(Flow::Wait),
+        crate::platform::FontDialogResult::Cancelled => None,
+        crate::platform::FontDialogResult::Selected(face) => Some(face),
+    };
     let mut next = settings.clone();
     if let Some(face) = &chosen {
         next.set_font_face(face).map_err(|why| call.error(why))?;
@@ -1232,9 +1260,24 @@ pub fn uses_bootstrap(command: u16) -> bool {
             )
     })
 }
+pub fn uses_bootstrap_for(semantics: Semantics, command: u16) -> bool {
+    match semantics {
+        Semantics::Root => uses_bootstrap(command),
+        Semantics::Variant(id) => variant_entry(id, command)
+            .is_some_and(|entry| entry.capability == Capability::Bootstrap),
+    }
+}
 pub fn uses_platform(command: u16) -> bool {
     ROOT.iter()
         .any(|e| e.command == command && e.capability == Capability::Platform)
+}
+pub fn uses_platform_for(semantics: Semantics, command: u16) -> bool {
+    match semantics {
+        Semantics::Root => uses_platform(command),
+        Semantics::Variant(id) => {
+            variant_entry(id, command).is_some_and(|entry| entry.capability == Capability::Platform)
+        }
+    }
 }
 pub fn uses_device_frame(command: u16) -> bool {
     ROOT.iter().any(|e| {
@@ -1322,6 +1365,14 @@ pub fn uses_movie_scene(command: u16) -> bool {
 pub fn uses_movie_player(command: u16) -> bool {
     ROOT.iter()
         .any(|e| e.command == command && e.capability == Capability::MoviePlayer)
+}
+pub fn uses_movie_player_for(semantics: Semantics, command: u16) -> bool {
+    match semantics {
+        Semantics::Root => uses_movie_player(command),
+        Semantics::Variant(id) => {
+            variant_entry(id, command).is_some_and(|e| e.capability == Capability::MoviePlayer)
+        }
+    }
 }
 
 fn root_quake(hosts: &mut Hosts<'_>, call: &mut Call<'_, '_>) -> Result<Flow, Box<dyn Error>> {
@@ -1461,6 +1512,12 @@ pub static ROOT: &[Entry] = &[
     Entry {
         command: 0x2bd,
         name: "save slot information",
+        capability: Capability::Runtime,
+        handler: root_runtime,
+    },
+    Entry {
+        command: 0x2be,
+        name: "set save slot metadata",
         capability: Capability::Runtime,
         handler: root_runtime,
     },
@@ -1891,6 +1948,12 @@ pub static ROOT: &[Entry] = &[
         handler: root_movie_scene,
     },
     Entry {
+        command: 0x30e,
+        name: "create scene movie with load mode",
+        capability: Capability::MovieScene,
+        handler: root_movie_scene,
+    },
+    Entry {
         command: 0x309,
         name: "start scene movie",
         capability: Capability::MovieStart,
@@ -1917,6 +1980,12 @@ pub static ROOT: &[Entry] = &[
     Entry {
         command: 0x31a,
         name: "scene movie active",
+        capability: Capability::MovieState,
+        handler: root_movie_state,
+    },
+    Entry {
+        command: 0x31e,
+        name: "scene movie frame",
         capability: Capability::MovieState,
         handler: root_movie_state,
     },
@@ -2543,6 +2612,12 @@ pub static ROOT: &[Entry] = &[
         name: "window pointer hit",
         capability: Capability::WindowPointer,
         handler: root_window_pointer,
+    },
+    Entry {
+        command: 0x15e,
+        name: "window position query",
+        capability: Capability::Windows,
+        handler: root_windows,
     },
     Entry {
         command: 0x194,
@@ -4255,6 +4330,12 @@ pub static ROOT: &[Entry] = &[
         handler: root_settings,
     },
     Entry {
+        command: 0x7,
+        name: "uptime seconds",
+        capability: Capability::Timers,
+        handler: root_timers,
+    },
+    Entry {
         command: 0x8,
         name: "frame clock",
         capability: Capability::Timers,
@@ -4360,6 +4441,106 @@ pub static ROOT: &[Entry] = &[
 
 /// Build-specific variants, selected only through an explicit profile binding.
 /// Implementation selection does not upgrade the command's evidence status.
+pub static KEYED_ARCHIVES: &[Entry] = &[
+    Entry {
+        command: 0x268,
+        name: "register keyed script archive",
+        capability: Capability::Bootstrap,
+        handler: root_bootstrap,
+    },
+    Entry {
+        command: 0x269,
+        name: "register keyed image archive",
+        capability: Capability::Bootstrap,
+        handler: root_bootstrap,
+    },
+    Entry {
+        command: 0x26a,
+        name: "register keyed sound archive",
+        capability: Capability::Bootstrap,
+        handler: root_bootstrap,
+    },
+    Entry {
+        command: 0x26b,
+        name: "register keyed music archive",
+        capability: Capability::Bootstrap,
+        handler: root_bootstrap,
+    },
+    Entry {
+        command: 0x26c,
+        name: "register keyed voice archive",
+        capability: Capability::Bootstrap,
+        handler: root_bootstrap,
+    },
+    Entry {
+        command: 0x26d,
+        name: "register keyed movie archive",
+        capability: Capability::Bootstrap,
+        handler: root_bootstrap,
+    },
+    Entry {
+        command: 0x26e,
+        name: "register keyed scene movie archive",
+        capability: Capability::Bootstrap,
+        handler: root_bootstrap,
+    },
+];
+
+fn mgv_player(hosts: &mut Hosts<'_>, call: &mut Call<'_, '_>) -> Result<Flow, Box<dyn Error>> {
+    let h = hosts
+        .movie_player
+        .as_mut()
+        .expect("movie player capability checked");
+    hosts
+        .movies
+        .as_deref_mut()
+        .expect("movie capability checked")
+        .handle_mgv(call, h.source, h.settings, h.backend)?;
+    Ok(Flow::Done)
+}
+pub static MGV_PLAYER: &[Entry] = &[
+    Entry {
+        command: 0xc4,
+        name: "open MGV player",
+        capability: Capability::MoviePlayer,
+        handler: mgv_player,
+    },
+    Entry {
+        command: 0xc5,
+        name: "stop MGV player",
+        capability: Capability::MoviePlayer,
+        handler: mgv_player,
+    },
+    Entry {
+        command: 0xc6,
+        name: "MGV player frame",
+        capability: Capability::MoviePlayer,
+        handler: mgv_player,
+    },
+];
+
+pub static DISPLAY_COUNT: &[Entry] = &[Entry {
+    command: 0x3c7,
+    name: "available display count",
+    capability: Capability::Platform,
+    handler: root_platform,
+}];
+
+pub static FULLSCREEN_MONITOR: &[Entry] = &[
+    Entry {
+        command: 0x3c5,
+        name: "fullscreen monitor selection mode",
+        capability: Capability::Platform,
+        handler: root_platform,
+    },
+    Entry {
+        command: 0x3c6,
+        name: "select fullscreen monitor",
+        capability: Capability::Platform,
+        handler: root_platform,
+    },
+];
+
 pub static FONT_CELLS: &[Entry] = &[
     Entry {
         command: 0x10b,
@@ -4422,6 +4603,17 @@ pub static FONT_CELLS: &[Entry] = &[
         capability: Capability::Text,
         handler: |hosts, call| {
             Ok(font_cells::poll_window(
+                hosts.text.as_mut().expect("text capability checked"),
+                call,
+            )?)
+        },
+    },
+    Entry {
+        command: 0x388,
+        name: "auxiliary font face",
+        capability: Capability::Text,
+        handler: |hosts, call| {
+            Ok(font_cells::auxiliary_face(
                 hosts.text.as_mut().expect("text capability checked"),
                 call,
             )?)
@@ -4610,6 +4802,42 @@ fn collision_mesh(hosts: &mut Hosts<'_>, call: &mut Call<'_, '_>) -> Result<Flow
     Ok(Flow::Done)
 }
 
+pub static LIST_SELECT: &[Entry] = &[Entry {
+    command: 0x37a,
+    name: "select list button",
+    capability: Capability::ButtonInput,
+    handler: |hosts, call| {
+        let h = hosts.input.as_mut().expect("input capability checked");
+        hosts
+            .buttons
+            .as_deref_mut()
+            .expect("buttons capability checked")
+            .handle_list_select(
+                call,
+                hosts
+                    .scene
+                    .as_deref_mut()
+                    .expect("scene capability checked"),
+                h.input,
+            )?;
+        Ok(Flow::Done)
+    },
+}];
+
+pub static OBJECT_QUEUE: &[Entry] = &[Entry {
+    command: 0x25,
+    name: "detach child queue",
+    capability: Capability::Scene,
+    handler: root_scene,
+}];
+
+pub static TEXT_ALPHA: &[Entry] = &[Entry {
+    command: 0x2f9,
+    name: "text alpha revision",
+    capability: Capability::Settings,
+    handler: root_settings,
+}];
+
 pub static BACKGROUND_AUDIO: &[Entry] = &[Entry {
     command: 0x2ed,
     name: "background audio output",
@@ -4623,9 +4851,16 @@ pub static BACKGROUND_AUDIO: &[Entry] = &[Entry {
 
 /// Static variant tables used when provisioning shared host capabilities.
 pub static VARIANT_TABLES: &[&[Entry]] = &[
+    MGV_PLAYER,
+    DISPLAY_COUNT,
+    FULLSCREEN_MONITOR,
+    KEYED_ARCHIVES,
     FONT_CELLS,
     PARTICLES,
     BACKGROUND_AUDIO,
+    TEXT_ALPHA,
+    OBJECT_QUEUE,
+    LIST_SELECT,
     FALLING_BILLBOARDS,
     COLLISION_PARTICLES,
     FRAGMENTS,
@@ -4633,6 +4868,13 @@ pub static VARIANT_TABLES: &[&[Entry]] = &[
 
 pub fn variant_entry(id: crate::profile::VariantId, command: u16) -> Option<&'static Entry> {
     let entries = match id {
+        crate::profile::VariantId::MgvPlayer => MGV_PLAYER,
+        crate::profile::VariantId::DisplayCount => DISPLAY_COUNT,
+        crate::profile::VariantId::FullscreenMonitor => FULLSCREEN_MONITOR,
+        crate::profile::VariantId::KeyedArchives => KEYED_ARCHIVES,
+        crate::profile::VariantId::ListSelect => LIST_SELECT,
+        crate::profile::VariantId::ObjectQueue => OBJECT_QUEUE,
+        crate::profile::VariantId::TextAlpha => TEXT_ALPHA,
         crate::profile::VariantId::FontCells => FONT_CELLS,
         crate::profile::VariantId::Particles => PARTICLES,
         crate::profile::VariantId::BackgroundAudio => BACKGROUND_AUDIO,
@@ -4645,6 +4887,15 @@ pub fn variant_entry(id: crate::profile::VariantId, command: u16) -> Option<&'st
 
 pub fn semantics_name(profile: &EngineProfile, command: u16) -> &'static str {
     match profile.semantics(command) {
+        Semantics::Variant(crate::profile::VariantId::MgvPlayer) => "variant MGV player",
+        Semantics::Variant(crate::profile::VariantId::DisplayCount) => "variant display count",
+        Semantics::Variant(crate::profile::VariantId::FullscreenMonitor) => {
+            "variant fullscreen monitor"
+        }
+        Semantics::Variant(crate::profile::VariantId::KeyedArchives) => "variant keyed archives",
+        Semantics::Variant(crate::profile::VariantId::ListSelect) => "variant list selection",
+        Semantics::Variant(crate::profile::VariantId::ObjectQueue) => "variant object queue",
+        Semantics::Variant(crate::profile::VariantId::TextAlpha) => "variant text alpha revision",
         Semantics::Variant(crate::profile::VariantId::FontCells) => "variant text override",
         Semantics::Variant(crate::profile::VariantId::Particles) => "variant particle override",
         Semantics::Variant(crate::profile::VariantId::BackgroundAudio) => {

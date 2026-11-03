@@ -1,6 +1,15 @@
 # Game records: data hashes identify a game; executables confirm the build of its profile.
 # Hashes are evidence from docs/games/<game>/; game files themselves never enter the repository.
 
+game miranosu
+profile cmvs-20110525
+start data/pack/start.ps2 sha256=2e8c7261ea801f59c9e80b9cdbde89832c0a65f7b622e2fa4551509b1cfe5143
+archive data/pack/script.cpz sha256=bd70dba1785ec45494e73c451e6d492a91fd2eb0e56787dc60bce96c9b06effe
+game-id 0x17500003
+executable cmvs64.exe sha256=9870e6d5cbd5242b9c686aae20fe10697e87328a66d322cfdb2c80021cb645c5
+executable cmvs32.exe sha256=78c2283990f3fec167a8097e5e56304edbad7e94d5367eae9e3f5cfa56b4cc4e
+end
+
 game hapymaher
 profile cmvs-20130131
 start data/pack/start.ps3 sha256=62fc84b6231432a0aed498065329b630f76ef4c9e114c1bf6dbdc4e564c0399e
@@ -17,6 +26,15 @@ archive data/pack/script.cpz sha256=13f8699c9ca44cd43731526aaf0abb5166026c2248d0
 game-id 0x17500003
 executable cmvs64.exe sha256=04e37c27be28aa0ffe5661a2757e766488316ccdb8c8698da2ea7677675b5aaa
 executable cmvs32.exe sha256=c6d85a84da362ba86d31b5763e0867e6e8df5e7243b4da34d9aafe2b1689f4cd
+end
+
+game chronoclock
+profile cmvs-20150405
+start data/pack/start.ps3 sha256=d4263a32830bb385fabfa7e06c2fde2d70e072722e3ed6c317292e7086fb6dce
+archive data/pack/script.cpz sha256=aa4bd891cc50fe658cacc050c6b216e8ba0389d17d01163e335f3177d6f14ba3
+game-id 0x17700011
+executable cmvs64.exe sha256=d1c4ade9551b827b8e401fc10f68a73e2525a67a217b63747898f5797894911d
+executable cmvs32.exe sha256=30edecfde8d69b60102c79c82db7eda3895126510e51c0ec76658a303f5a49b4
 end
 
 game amatsutsumi
@@ -38,11 +56,11 @@ executable cmvs64.exe sha256=3bccda5d7611412c6938c0c9b06b2195914cfb78763a53f2c23
 executable cmvs32.exe sha256=b1621c5b504a800344316d72dc4477fbf13a00f15f8308470952429f4013003a
 end
 
-game chronoclock
-profile cmvs-20150405
-start data/pack/start.ps3 sha256=d4263a32830bb385fabfa7e06c2fde2d70e072722e3ed6c317292e7086fb6dce
-archive data/pack/script.cpz sha256=aa4bd891cc50fe658cacc050c6b216e8ba0389d17d01163e335f3177d6f14ba3
-game-id 0x17700011
-executable cmvs64.exe sha256=d1c4ade9551b827b8e401fc10f68a73e2525a67a217b63747898f5797894911d
-executable cmvs32.exe sha256=30edecfde8d69b60102c79c82db7eda3895126510e51c0ec76658a303f5a49b4
+game realive
+profile cmvs-20190305
+start data/pack/start.ps3 sha256=9a331e2cfa3b031687a6334065198db99ee86f1c70bbfbd45b9545865560a1d5
+archive data/pack/script.cpz sha256=ef496c6470359b45bdb3838be5c1d6dd4aca896dc976f17f7003a984e376cf24
+game-id 0x1810a032
+executable cmvs64.exe sha256=02b71aac3d3d1ced1d0312b6c37748cf12df9cffd9585fb07787e6ca43199f00
+executable cmvs32.exe sha256=6705a43d85121b56961515f3dd0a0766a14a91ffa76df8866d8c7d6133a56a44
 end

@@ -189,6 +189,7 @@ impl<'a> Session<'a> {
         if let Some(patch) = &target.patch {
             run.set_patch(Some(patch.clone()));
         }
+        run.set_mgv_factory(Box::new(cmvs_desktop::video::TheoraFactory));
         run.set_block_presumed(options.block_presumed);
         run.set_block_unreviewed(options.block_unreviewed);
         run.set_user_data_directory(user)
@@ -210,9 +211,13 @@ impl<'a> Session<'a> {
             }
         }
         run.set_random_seed(options.seed);
+        let mut backend = RecordingBackend::default();
+        backend.set_screen_size(
+            cmvs_core::viewport::ScreenSize::new(run.screen_size()).map_err(|e| e.to_string())?,
+        );
         Ok(Self {
             run,
-            backend: RecordingBackend::default(),
+            backend,
             codes: CodeInput::default(),
             bindings: target.key_bindings.clone().unwrap_or_default(),
             device: options.device,

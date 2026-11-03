@@ -123,6 +123,7 @@ pub struct TextObject {
     pub face: Arc<[u8]>,
     /// +108: weight of the persistent font object, captured by each new glyph.
     pub bold: bool,
+    pub revision_alpha: bool,
     /// Uniform scale of the text's scene object, kept as f32 bits (0x20ec).
     pub scale_bits: u32,
     /// Configuration words 4/5 (+552/+556): the script-space size that 0x14005aac0 divides
@@ -211,6 +212,8 @@ pub trait GlyphMetrics: std::fmt::Debug {
 
 #[derive(Debug, Default)]
 pub struct MessageHost {
+    child_slots: crate::scene::ChildSlots,
+    screen_size: crate::viewport::ScreenSize,
     /// State owned by the separately dispatched font-cell text implementation.
     font_cells: font_cells::State,
     output_settings: crate::settings::TextOutputSettings,
@@ -236,6 +239,20 @@ pub struct MessageHost {
 }
 
 impl MessageHost {
+    /// Construct window-object hosts using the selected runtime child-table layout.
+    pub fn for_profile(profile: &crate::profile::EngineProfile) -> Self {
+        Self {
+            child_slots: crate::scene::ChildSlots::for_profile(profile),
+            ..Self::default()
+        }
+    }
+
+    pub fn screen_size(&self) -> [u32; 2] {
+        self.screen_size.pixels()
+    }
+    pub(crate) fn set_screen_size(&mut self, size: crate::viewport::ScreenSize) {
+        self.screen_size = size;
+    }
     /// 0x140080700 frees windows, text and auxiliary text lists, retaining font devices.
     pub(crate) fn reset_objects(&mut self) {
         self.windows = Default::default();
@@ -251,6 +268,15 @@ impl MessageHost {
                     text.bold = settings.bold;
                     self.font_bold[index] = settings.bold;
                 }
+            }
+        }
+        // Cache invalidation affects future glyphs in every font, including named faces.
+        if self.output_settings.revision_alpha != settings.revision_alpha {
+            for text in self.texts.iter_mut().flatten() {
+                text.revision_alpha = settings.revision_alpha;
+            }
+            for group in self.auxiliary_texts.iter_mut().flatten() {
+                group.revision_alpha = settings.revision_alpha;
             }
         }
         self.output_settings = settings;
@@ -319,6 +345,14 @@ impl MessageHost {
     pub fn window(&self, slot: usize) -> Option<&MessageWindow> {
         self.windows.get(slot)?.as_ref()
     }
+    /// Window objects for rendering, in ascending window slot order.
+    pub fn visible_window_objects(&self) -> impl Iterator<Item = &SceneObject> {
+        self.windows
+            .iter()
+            .flatten()
+            .filter(|window| window.visible && !window.hidden)
+            .map(|window| &window.object)
+    }
     pub fn text(&self, index: usize) -> Option<&TextObject> {
         self.texts.get(index)?.as_ref()
     }
@@ -386,8 +420,8 @@ impl MessageHost {
             ((value as u32).wrapping_mul(logical as u32) / screen) as i32
         };
         let (px, py) = (
-            scale(px, logical[0], RESEARCH_SCREEN[0]),
-            scale(py, logical[1], RESEARCH_SCREEN[1]),
+            scale(px, logical[0], self.screen_size()[0]),
+            scale(py, logical[1], self.screen_size()[1]),
         );
         let [x, y, w, h] = args;
         let left = x.wrapping_add(window.position[0]);
@@ -443,8 +477,8 @@ impl MessageHost {
             value.wrapping_mul(logical).wrapping_div(screen as i32)
         };
         let (px, py) = (
-            scale(px, logical[0], RESEARCH_SCREEN[0]),
-            scale(py, logical[1], RESEARCH_SCREEN[1]),
+            scale(px, logical[0], self.screen_size()[0]),
+            scale(py, logical[1], self.screen_size()[1]),
         );
         call.complete(0x4004)?;
         let window = self.windows[slot].as_mut().expect("checked above");
@@ -614,6 +648,22 @@ impl MessageHost {
     }
 
     pub(crate) fn handle_window(&mut self, call: &mut Call<'_, '_>) -> Result<(), DecodeError> {
+        if call.command == 0x15e {
+            // MIRANOSU 0x14006b310 -> 0x140052290: window +12/+16, not text pen.
+            let slot = call_window_slot(call)?;
+            let point = self.windows[slot]
+                .as_ref()
+                .ok_or_else(|| call.error("window position query needs an existing window"))?
+                .position;
+            call.complete(0x4004)?;
+            for (slot, value) in [1, 2].into_iter().zip(point) {
+                call.vm
+                    .state_mut()
+                    .set_system_integer(slot, value as u32)
+                    .expect("result exists");
+            }
+            return Ok(());
+        }
         match call.command {
             0xec => self.scale(call),
             0x141 => self.destroy(call),
@@ -724,7 +774,8 @@ impl MessageHost {
                 "auxiliary font face selection is not modeled",
             ));
         }
-        let candidate = AuxiliaryText::new(args[2], args[3]).map_err(|e| error(pc, 0x2380, e.0))?;
+        let candidate = AuxiliaryText::new(args[2], args[3], self.screen_size())
+            .map_err(|e| error(pc, 0x2380, e.0))?;
         call.complete(0x4010)?;
         call.vm
             .state_mut()
@@ -735,6 +786,7 @@ impl MessageHost {
         let face = self.default_face();
         let mut candidate = candidate;
         candidate.face = self.auxiliary_font_faces[slot].get_or_insert(face).clone();
+        candidate.revision_alpha = self.output_settings.revision_alpha;
         // The native overwrite leaks its old object; Rust drops owned state.
         self.auxiliary_texts[slot] = Some(candidate);
         Ok(())
@@ -777,14 +829,15 @@ impl MessageHost {
         let child = call.argument(8, window_argument_names(call.command)[1])? as i32;
         let target = self.windows[slot]
             .as_ref()
-            .and_then(|window| window_target(&window.object, child))
+            .and_then(|window| window_target(&window.object, child, self.child_slots.count()))
             .ok_or_else(|| error(pc, op, "message window or window child does not exist"))?;
         if !matches!(command, 0x17a | 0x17c | 0x180) && target.draw.is_none() {
             return Err(error(pc, op, "window object has no draw state"));
         }
         call.complete(0x4008 + 4 * count as u16)?;
         let window = self.windows[slot].as_mut().expect("checked above");
-        let target = window_target_mut(&mut window.object, child).expect("checked above");
+        let target = window_target_mut(&mut window.object, child, self.child_slots.count())
+            .expect("checked above");
         let [a, b, c, d] = args;
         let setter = match command {
             0x17a => {
@@ -957,8 +1010,8 @@ impl MessageHost {
     ///
     /// Constructor 0x14005c550 without 0x14005d3b0: the memset leaves position, area, pen,
     /// glyph size and spacing 0; colours 0xffffff, +144 delay 30, +148 shown, +152 layer 1,
-    /// ruby size 12. The logical size (+552/+556) repeats screen info +8/+12, which the
-    /// research viewport stands in for. The face is copied into +44 and selected on the
+    /// ruby size 12. The logical size (+552/+556) repeats the configured screen info +8/+12.
+    /// The face is copied into +44 and selected on the
     /// font object (0x140059b90); only the default empty face is modeled. The capacity
     /// (+324) sizes the glyph texture in 0x14005a6a0: 0 and 196 (0x215d's value) both give
     /// a 1024x2048 texture; other capacities are rejected because textures are not modeled.
@@ -1014,8 +1067,9 @@ impl MessageHost {
             font_face: Vec::new(),
             face,
             bold: self.font_bold[index],
+            revision_alpha: self.output_settings.revision_alpha,
             scale_bits: 1.0f32.to_bits(),
-            logical_size: RESEARCH_SCREEN.map(|v| v as i32),
+            logical_size: self.screen_size().map(|v| v as i32),
             position: [0, 0],
             area: [0; 4],
             cursor: [0, 0],
@@ -1218,14 +1272,14 @@ impl MessageHost {
         }
         let target = self.windows[slot]
             .as_ref()
-            .and_then(|window| window_target(&window.object, child))
+            .and_then(|window| window_target(&window.object, child, self.child_slots.count()))
             .ok_or_else(|| error(pc, op, "message window or window child does not exist"))?;
         if target.draw.is_none() {
             return Err(error(pc, op, "window object has no draw state"));
         }
         call.complete(0x4008 + 4 * count as u16)?;
         let window = self.windows[slot].as_mut().expect("checked above");
-        let draw = window_target_mut(&mut window.object, child)
+        let draw = window_target_mut(&mut window.object, child, self.child_slots.count())
             .and_then(|target| target.draw.as_mut())
             .expect("checked above");
         if command == 0x1cf {
@@ -1712,11 +1766,18 @@ impl MessageHost {
         let child = match u16::try_from(child) {
             Err(_) if child < 0 => None,
             Ok(id)
-                if id < 768 && (command == 0x178 || window.object.children.contains_key(&id)) =>
+                if id < self.child_slots.count()
+                    && (command == 0x178 || window.object.children.contains_key(&id)) =>
             {
                 Some(id)
             }
-            _ => return Err(error(pc, op, "window child outside 0..767 or missing")),
+            _ => {
+                return Err(error(
+                    pc,
+                    op,
+                    "window child outside this build's table or missing",
+                ));
+            }
         };
         call.complete(0x4008)?;
         let object = &mut self.windows[slot].as_mut().expect("checked above").object;
@@ -1777,7 +1838,7 @@ impl MessageHost {
         call.complete(0x4008)?;
         let object = &mut self.windows[slot].as_mut().expect("checked above").object;
         if let Ok(id) = u16::try_from(child)
-            && id < 768
+            && id < self.child_slots.count()
         {
             object.children.remove(&id);
         }
@@ -1797,7 +1858,7 @@ impl MessageHost {
                 "message window slot without a window sets an unmodeled flag",
             )
         })?;
-        let exists = window_target(&window.object, child).is_some();
+        let exists = window_target(&window.object, child, self.child_slots.count()).is_some();
         call.complete(0x4008)?;
         call.vm
             .state_mut()
@@ -2020,7 +2081,7 @@ impl MessageHost {
         let [x, y, width, height] = [12, 16, 20, 24].map(&mut word);
         let (position, size) = ([x?, y?], [width?, height?]);
         let logical_size = if command == 0x140 {
-            RESEARCH_SCREEN.map(|v| v as i32)
+            self.screen_size().map(|v| v as i32)
         } else {
             [word(28)?, word(32)?]
         };
@@ -2042,6 +2103,7 @@ impl MessageHost {
             font_face: Vec::new(),
             face,
             bold: self.font_bold[text],
+            revision_alpha: self.output_settings.revision_alpha,
             scale_bits: 1.0f32.to_bits(),
             logical_size,
             position,
@@ -2088,17 +2150,21 @@ impl MessageHost {
 }
 
 /// 0x14005d280: a negative child selects the object itself, others an existing child.
-fn window_target(object: &SceneObject, child: i32) -> Option<&SceneObject> {
+fn window_target(object: &SceneObject, child: i32, child_slots: u16) -> Option<&SceneObject> {
     match u16::try_from(child) {
         Err(_) if child < 0 => Some(object),
-        Ok(id) if id < 768 => object.children.get(&id),
+        Ok(id) if id < child_slots => object.children.get(&id),
         _ => None,
     }
 }
-fn window_target_mut(object: &mut SceneObject, child: i32) -> Option<&mut SceneObject> {
+fn window_target_mut(
+    object: &mut SceneObject,
+    child: i32,
+    child_slots: u16,
+) -> Option<&mut SceneObject> {
     match u16::try_from(child) {
         Err(_) if child < 0 => Some(object),
-        Ok(id) if id < 768 => object.children.get_mut(&id),
+        Ok(id) if id < child_slots => object.children.get_mut(&id),
         _ => None,
     }
 }
@@ -2160,11 +2226,13 @@ impl MessageHost {
                 };
                 text.face = self.font_faces[index].get_or_insert(face).clone();
                 self.font_bold[index] = text.bold;
+                text.revision_alpha = self.output_settings.revision_alpha;
                 // 0x14005c8f0 redraws every descriptor with the restored text font;
                 // reveal state and the old rasterized face are not serialized.
                 for glyph in &mut text.glyphs {
                     glyph.face = text.face.clone();
                     glyph.bold = text.bold;
+                    glyph.revision_alpha = text.revision_alpha;
                 }
             }
         }
@@ -2175,10 +2243,11 @@ impl MessageHost {
 }
 
 fn is_window_command(command: u16) -> bool {
-    matches!(command, 0xec | 0x140..=0x151 | 0x155 | 0x15a | 0x15b | 0x15d | 0x171 | 0x178..=0x17c | 0x17f | 0x180 | 0x182..=0x186 | 0x18d | 0x190..=0x192 | 0x195..=0x197 | 0x1cf..=0x1d1)
+    matches!(command, 0xec | 0x140..=0x151 | 0x155 | 0x15a | 0x15b | 0x15d | 0x15e | 0x171 | 0x178..=0x17c | 0x17f | 0x180 | 0x182..=0x186 | 0x18d | 0x190..=0x192 | 0x195..=0x197 | 0x1cf..=0x1d1)
 }
 fn window_argument_names(command: u16) -> &'static [&'static str] {
     match command {
+        0x15e => &["window slot"],
         0x140 => &["window slot", "text slot", "x", "y", "width", "height"],
         0x15d => &[
             "window slot",

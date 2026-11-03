@@ -7,7 +7,6 @@ use crate::{
 use cmvs_core::{
     MAX_PAYLOAD,
     bytecode::{self, InstructionKind},
-    cpz::ArchiveIndex,
     profile::CommandStatus,
     ps3::Script,
 };
@@ -89,10 +88,11 @@ pub fn scripts(target: &Target) -> (CheckResult, Option<ScriptInventory>) {
     // and skip an archive entry of the same name.
     let start_name = files.start_name();
     inventory.add(start_name.escape_ascii().to_string(), start);
-    let archive = File::open(target.root.join(&files.script_archive)).and_then(|mut file| {
-        let index = ArchiveIndex::read(&mut file).map_err(std::io::Error::other)?;
-        Ok((file, index))
-    });
+    let archive = crate::target::open_archive(
+        &target.root,
+        files,
+        &target.root.join(&files.script_archive),
+    );
     match archive {
         Ok((mut file, index)) => {
             for (i, entry) in index.entries().iter().enumerate() {
@@ -288,10 +288,7 @@ pub fn resources(target: &Target) -> CheckResult {
                 continue;
             }
             archives += 1;
-            let opened = File::open(&path).and_then(|mut file| {
-                let index = ArchiveIndex::read(&mut file).map_err(std::io::Error::other)?;
-                Ok((file, index))
-            });
+            let opened = crate::target::open_archive(&target.root, files, &path);
             let (mut file, index) = match opened {
                 Ok(opened) => opened,
                 Err(e) => {
@@ -312,7 +309,7 @@ pub fn resources(target: &Target) -> CheckResult {
                     Err(e) => fail(label, e.to_string()),
                 }
             }
-        } else if matches!(kind.as_str(), "ogg" | "cmv") {
+        } else if matches!(kind.as_str(), "ogg" | "cmv" | "mgv") {
             *kinds.entry(kind.clone()).or_default() += 1;
             // Loose movies can be large: parse the index from the file itself.
             let checked = if kind == "cmv" {
@@ -320,6 +317,14 @@ pub fn resources(target: &Target) -> CheckResult {
                     .map_err(|e| e.to_string())
                     .and_then(|mut f| {
                         cmvs_core::cmv::CmvIndex::read_scene(&mut f)
+                            .map(|_| ())
+                            .map_err(|e| e.to_string())
+                    })
+            } else if kind == "mgv" {
+                File::open(&path)
+                    .map_err(|e| e.to_string())
+                    .and_then(|mut f| {
+                        cmvs_core::mgv::MgvIndex::read(&mut f)
                             .map(|_| ())
                             .map_err(|e| e.to_string())
                     })

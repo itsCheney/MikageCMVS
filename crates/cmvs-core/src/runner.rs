@@ -107,6 +107,7 @@ pub enum SnapshotPolicy {
 }
 pub struct Startup<'a> {
     slot_edit: Option<slot_edit::SlotEdit>,
+    main_script_name: &'static [u8],
     quit: bool,
     focused: bool,
     machine: Machine<'a>,
@@ -194,6 +195,15 @@ impl<'a> Startup<'a> {
         // 0x14000a3c0 reads the startup settings; cmvs.cfg is optional and read only.
         let configuration = crate::settings::Configuration::read(&root.join("cmvs.cfg"))?
             .unwrap_or(crate::settings::Configuration::new(Vec::new())?);
+        let screen_size = configuration.screen_size()?;
+        let mut scene = SceneHost::for_profile(game.selection.profile);
+        scene.set_screen_size(screen_size);
+        let mut buttons = ButtonHost::default();
+        buttons.set_screen_size(screen_size);
+        let mut camera = CameraHost::default();
+        camera.set_screen_size(screen_size);
+        let mut messages = MessageHost::for_profile(game.selection.profile);
+        messages.set_screen_size(screen_size);
         let text = configuration.bytes();
         let mut save_menu = SaveMenuHost::default();
         save_menu.set_confirmations(
@@ -209,6 +219,11 @@ impl<'a> Startup<'a> {
         platform.configure_display_selection(text);
         Ok(Self {
             slot_edit: None,
+            main_script_name: if game.files.start_name() == b"start.ps2" {
+                b"main.ps2"
+            } else {
+                b"main.ps3"
+            },
             quit: false,
             machine,
             gate: CommandGate::new(game.selection.clone()),
@@ -218,7 +233,16 @@ impl<'a> Startup<'a> {
             bootstrap: Bootstrap::default(),
             control: ScriptControl::new(virtual_tick),
             source: crate::script_control::PatchedScripts {
-                inner: ArchiveScripts::new(File::open(root.join(&game.files.script_archive))?)?,
+                inner: ArchiveScripts::from_start(
+                    File::open(root.join(&game.files.script_archive))?,
+                    script,
+                    game.files
+                        .script_archive
+                        .file_name()
+                        .and_then(|s| s.to_str())
+                        .ok_or(crate::FormatError("archive basename is not UTF-8"))?
+                        .as_bytes(),
+                )?,
                 patch: None,
             },
             patch: None,
@@ -229,13 +253,13 @@ impl<'a> Startup<'a> {
             system_output: None,
             assets: DirectoryAssets::new(root)?,
             platform,
-            scene: SceneHost::default(),
-            buttons: ButtonHost::default(),
+            scene,
+            buttons,
             movies: MovieHost::default(),
             scene_movies: ResourceArchives::new(root)?,
             root: root.canonicalize()?,
             sequence: SequenceHost::default(),
-            camera: CameraHost::default(),
+            camera,
             capture: ScreenCapture::default(),
             // No verified key bindings yet: no action is active (see `input`).
             input: ActionInput::default(),
@@ -249,7 +273,7 @@ impl<'a> Startup<'a> {
             gesture: PointerGesture::default(),
             message_flags,
             settings,
-            messages: MessageHost::default(),
+            messages,
             history: HistoryHost::default(),
             // Explicit research seed, like the virtual tick; the original seeds from timeGetTime.
             random: CrtRandom::new(0),
@@ -342,16 +366,29 @@ impl<'a> Startup<'a> {
         &self.movies
     }
     pub fn movie_frame(&self) -> Option<&crate::raster::RgbaImage> {
-        self.movies.player().and_then(|m| m.image.as_ref())
+        self.movies.player_image()
+    }
+    pub fn set_mgv_factory(&mut self, factory: Box<dyn crate::mgv::DecoderFactory>) {
+        self.movies.set_mgv_factory(factory);
     }
     pub fn set_decode_movie_frames(&mut self, enabled: bool) {
         self.movies.set_decode_frames(enabled);
+    }
+    pub fn screen_size(&self) -> [u32; 2] {
+        self.messages.screen_size()
     }
     pub fn render_frame(&self) -> Result<crate::raster::RgbaImage, crate::FormatError> {
         match self.movie_frame() {
             Some(image) => Ok(image.clone()),
             None => {
-                crate::scene_render::render_scene(&self.scene, Some(&self.camera), &[], 1280, 720)
+                let [width, height] = self.screen_size();
+                crate::scene_render::render_scene(
+                    &self.scene,
+                    Some(&self.camera),
+                    &[],
+                    width,
+                    height,
+                )
             }
         }
     }
@@ -361,7 +398,7 @@ impl<'a> Startup<'a> {
         }
         self.audio_backend.update()?;
         let clock = self.audio_backend.movie_clock()?;
-        let had_movie = self.movies.player().is_some();
+        let had_movie = self.movies.has_player();
         self.movies.advance_with_clock(
             delta_ms,
             clock,
@@ -371,29 +408,11 @@ impl<'a> Startup<'a> {
                 patch: self.patch.as_deref().and_then(|p| p.movie_directory()),
             },
         )?;
-        if had_movie && self.movies.player().is_none() && clock.is_some() {
+        if had_movie && !self.movies.has_player() && clock.is_some() {
             self.audio_backend.stop_movie_audio()?;
         }
         self.movies.advance_scene(delta_ms, &mut self.scene)?;
-        if !self.frame_running() {
-            self.frame_delta = 0;
-            return Ok(());
-        }
-        self.sequence.advance_frame_with_hosts(
-            delta_ms,
-            &mut self.scene,
-            &mut self.images.with_paths(self.bootstrap.paths()),
-            &mut self.camera,
-        )?;
-        self.scene.advance_frame(delta_ms);
-        self.scene
-            .advance_effect_pools(delta_ms, &mut self.random, &self.camera)?;
-        self.messages.advance_frame(delta_ms);
-        self.messages
-            .advance_auxiliary_motion(delta_ms, &mut self.scene)?;
-        self.camera.advance_frame(delta_ms);
-        self.frame_delta = delta_ms;
-        self.take_capture()
+        self.advance_frame_state(delta_ms)
     }
     /// The main loop 0x14000e400 draws after the updates (0x140015900, then 0x140009c90);
     /// the draw 0x140015fc0 ends with 0x1400157b0, which serves a pending 0x2304 request.
@@ -404,7 +423,7 @@ impl<'a> Startup<'a> {
         if !self.capture.requested() {
             return Ok(());
         }
-        if self.movies.player().is_some() {
+        if self.movies.has_player() {
             return Err("screen capture during a full-screen movie is not verified".into());
         }
         let texts = (0..crate::message::TEXT_OBJECTS).filter_map(|i| self.messages.text(i));
@@ -420,12 +439,8 @@ impl<'a> Startup<'a> {
         {
             return Err("screen capture over auxiliary glyphs needs the font backend".into());
         }
-        let windows: Vec<_> = (0..crate::message::MESSAGE_WINDOWS)
-            .filter_map(|i| self.messages.window(i))
-            .filter(|window| window.visible && !window.hidden)
-            .map(|window| &window.object)
-            .collect();
-        let [width, height] = crate::message::RESEARCH_SCREEN;
+        let windows: Vec<_> = self.messages.visible_window_objects().collect();
+        let [width, height] = self.screen_size();
         let frame = crate::scene_render::render_scene(
             &self.scene,
             Some(&self.camera),
@@ -458,7 +473,11 @@ impl<'a> Startup<'a> {
             return Ok(());
         }
         self.movies.advance_scene(delta_ms, &mut self.scene)?;
+        self.movies.advance_mgv(delta_ms, None)?;
         self.movies.advance(delta_ms);
+        self.advance_frame_state(delta_ms)
+    }
+    fn advance_frame_state(&mut self, delta_ms: u32) -> Result<(), Box<dyn Error>> {
         if !self.frame_running() {
             self.frame_delta = 0;
             return Ok(());
@@ -652,6 +671,7 @@ impl<'a> Startup<'a> {
             LoadSlot { slot } => self.handle_load_slot(&request, slot, backend)?,
             SaveSlot { slot } => self.handle_save_slot(&request, slot)?,
             EditSlots { first, second } => self.handle_edit_slots(&request, first, second)?,
+            SetSlotInfo { slot, values } => self.handle_set_slot_info(&request, slot, values)?,
             Thumbnail => self.handle_thumbnail(&request)?,
             LatestSlot { start, count } => self.handle_latest_slot(&request, start, count)?,
             SlotInfo {
@@ -745,7 +765,7 @@ impl<'a> Startup<'a> {
                 command: command + 0x2000,
             });
         }
-        if crate::dispatch::uses_bootstrap(command) {
+        if crate::dispatch::uses_bootstrap_for(resolved.semantics, command) {
             let mut hosts = crate::dispatch::Hosts::default();
             if command == 0x34d {
                 hosts.function_keys =
@@ -754,6 +774,10 @@ impl<'a> Startup<'a> {
                 hosts.bootstrap = Some(&mut self.bootstrap);
             }
             let flow = crate::dispatch::run(resolved.semantics, &mut self.machine, &mut hosts)?;
+            self.images
+                .configure_parameters(self.bootstrap.archive_parameters());
+            self.scene_movies
+                .configure_parameters(self.bootstrap.archive_parameters());
             return Ok(if flow == Some(crate::dispatch::Flow::Done) {
                 StartupEvent::Progress
             } else {
@@ -765,6 +789,8 @@ impl<'a> Startup<'a> {
         }
         if matches!(command, 0xa0 | 0xa4 | 0xa6 | 0xb0 | 0xba | 0x2d6 | 0x2d7) {
             self.audio_backend.configure_paths(self.bootstrap.paths())?;
+            self.audio_backend
+                .configure_archive_parameters(self.bootstrap.archive_parameters())?;
         }
         let gate = SkipGate {
             effects: self.effects,
@@ -874,7 +900,7 @@ impl<'a> Startup<'a> {
         let mut scene_movie_source = self
             .scene_movies
             .with_paths(self.bootstrap.paths(), ResourceKind::SceneMovie);
-        let is_movie_player = crate::dispatch::uses_movie_player(command);
+        let is_movie_player = crate::dispatch::uses_movie_player_for(resolved.semantics, command);
         let mut hosts = crate::dispatch::Hosts {
             runtime: true,
             message_wait: None,
@@ -931,14 +957,14 @@ impl<'a> Startup<'a> {
         };
         if crate::dispatch::uses_message_state(command) {
             hosts.messages = Some(&mut self.messages);
-            if crate::dispatch::uses_input(command) {
+            if crate::dispatch::uses_input_for(resolved.semantics, command) {
                 hosts.input = Some(crate::dispatch::InputHosts {
                     input: &mut self.input,
                     skip: message_flags.skip(),
                     clock: Some(input_clock),
                 });
             }
-        } else if crate::dispatch::uses_input(command) {
+        } else if crate::dispatch::uses_input_for(resolved.semantics, command) {
             hosts.input = Some(crate::dispatch::InputHosts {
                 input: &mut self.input,
                 skip: message_flags.skip(),
@@ -951,7 +977,7 @@ impl<'a> Startup<'a> {
                 flags: message_flags,
             });
         }
-        if crate::dispatch::uses_platform(command) {
+        if crate::dispatch::uses_platform_for(resolved.semantics, command) {
             hosts.platform = Some(crate::dispatch::PlatformHosts {
                 host: &mut self.platform,
                 backend,

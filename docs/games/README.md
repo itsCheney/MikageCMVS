@@ -9,14 +9,14 @@
 | [《メモリア》 / memoria](memoria/README.md) | `2009-08-28_MEMORIA` | 基础档案；尚无构建 profile 或运行验证 |
 | [《夏に奏でる僕らの詩》 / natsuuta](natsuuta/README.md) | `2010-03-26_NATSUUTA` | 基础档案；尚无构建 profile 或运行验证 |
 | [《初恋サクラメント》 / hassaku](hassaku/README.md) | `2010-12-24_HASSAKU` | 基础档案；尚无构建 profile 或运行验证 |
-| [《未来ノスタルジア》 / miranosu](miranosu/README.md) | `2011-09-02_MIRANOSU` | 基础档案；尚无构建 profile 或运行验证 |
+| [《未来ノスタルジア》 / miranosu](miranosu/README.md) | `2011-09-02_MIRANOSU` | 已绑定构建、适配1024×768与v2快照子集；待实机验收 |
 | [《しあわせ家族部》 / kazokubu](kazokubu/README.md) | `2012-05-25_KAZOKUBU` | 基础档案；尚无构建 profile 或运行验证 |
 | [《ハピメア》 / hapymaher](hapymaher/README.md) | `2013-02-28_HAPYMAHER` | 开头I1–I5/V1–V4及已观察P2通过；4条选择链回标题，37个前缀和完整页面遍历待推进 |
 | [《ハピメア-Fragmentation Dream-》 / hapymaherfd](hapymaherfd/README.md) | `2014-02-28_HAPYMAHERFD` | 基础档案；尚无构建 profile 或运行验证 |
 | [《クロノクロック》 / chronoclock](chronoclock/README.md) | `2015-04-24_CHRONOCLOCK` | 已有构建 profile、语义研究与运行验证 |
 | [《アマツツミ》 / amatsutsumi](amatsutsumi/README.md) | `2016-07-29_AMATSUTSUMI` | 已有语义研究、路线重放及部分原生验证 |
 | [《アオイトリ》 / aoitori](aoitori/README.md) | `2017-11-24_AOITORI` | 已有构建 profile；标题及首段剧情研究中 |
-| [《リアライブ》 / realive](realive/README.md) | `2019-03-29_REALIVE` | 基础档案；尚无构建 profile 或运行验证 |
+| [《リアライブ》 / realive](realive/README.md) | `2019-03-29_REALIVE` | 标题、确定性及输入/回看探针通过；MGV1 全帧已对照；首选分支已回标题，全路线未验证；页面 `P1/P3/C1/L0`、设置 `C2–C4/L1` 通过 |
 | [《青春フラジャイル》 / seishunf](seishunf/README.md) | `2020-08-28_SEISHUNF` | 基础档案；尚无构建 profile 或运行验证 |
 | [《クナド国記》 / kunado](kunado/README.md) | `2021-12-24_KUNADO` | 基础档案；尚无构建 profile 或运行验证 |
 | [《ハピメア REGRET END》 / hapymaher_re](hapymaher_re/README.md) | `2023-05-26_HAPYMAHER_RE` | 基础档案；尚无构建 profile 或运行验证 |

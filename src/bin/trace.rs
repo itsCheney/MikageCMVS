@@ -353,7 +353,7 @@ fn run() -> Result<(), Box<dyn Error>> {
                 skip: message_flags.skip(),
                 ..SkipGate::default()
             };
-            if cmvs_rs::dispatch::uses_bootstrap(command) {
+            if cmvs_rs::dispatch::uses_bootstrap_for(resolved.semantics, command) {
                 let mut hosts = cmvs_rs::dispatch::Hosts::default();
                 if command == 0x34d {
                     if platform_assets.is_some() {
@@ -368,6 +368,9 @@ fn run() -> Result<(), Box<dyn Error>> {
                 if cmvs_rs::dispatch::run(resolved.semantics, &mut machine, &mut hosts)?
                     == Some(cmvs_rs::dispatch::Flow::Done)
                 {
+                    if let (Some(images), Some(config)) = (&mut images, &bootstrap) {
+                        images.configure_parameters(config.archive_parameters());
+                    }
                     if command == 0x34d && platform_assets.is_some() {
                         println!(
                             "# input 0x{:04x}: system_integer[0]={:?} [4]={:?}; no input supplied",
@@ -389,7 +392,8 @@ fn run() -> Result<(), Box<dyn Error>> {
             let no_paths = BTreeMap::new();
             let paths = bootstrap.as_ref().map_or(&no_paths, Bootstrap::paths);
             let mut registered_images = images.as_mut().map(|images| images.with_paths(paths));
-            let is_movie_player = cmvs_rs::dispatch::uses_movie_player(command);
+            let is_movie_player =
+                cmvs_rs::dispatch::uses_movie_player_for(resolved.semantics, command);
             let movie_settings = audio.settings();
             let mut movie_source = movie_root.as_ref().map(|root| DirectoryMovies {
                 root,
@@ -563,6 +567,9 @@ fn run() -> Result<(), Box<dyn Error>> {
                 );
                 if platform_backend.requests().len() > previous {
                     match platform_backend.requests().last().expect("new request") {
+                        PlatformRequest::FullscreenMonitor(mode) => {
+                            println!("# fullscreen monitor mode={mode}")
+                        }
                         PlatformRequest::Fullscreen(value) => {
                             println!("# recorded fullscreen={value}")
                         }

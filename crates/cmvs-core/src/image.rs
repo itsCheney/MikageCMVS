@@ -38,6 +38,12 @@ pub struct ImageArchives {
     patch: Option<std::sync::Arc<dyn crate::patch::PatchFiles>>,
 }
 impl ImageArchives {
+    pub fn configure_parameters(
+        &mut self,
+        parameters: &BTreeMap<(u16, u32), crate::cpz::Cpz7Parameters>,
+    ) {
+        self.archives.configure_parameters(parameters);
+    }
     pub fn new(root: impl AsRef<Path>) -> Result<Self, Box<dyn Error>> {
         Ok(Self {
             archives: ResourceArchives::new(root)?,

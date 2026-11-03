@@ -66,6 +66,7 @@ impl Startup<'_> {
         for (key, value) in [
             ("TEXT_GANG", text.outline),
             ("TEXT_BOLD", u32::from(text.bold)),
+            ("TEXT_REVISION_ALPHA", u32::from(text.revision_alpha)),
             ("TEXT_WAIT", text.speed),
             ("EFFECT_TYPE", text.reveal_mode),
             ("EFFECT_TIMER", text.reveal_duration),
@@ -102,6 +103,11 @@ impl Startup<'_> {
         ] {
             configuration.set_integer("SOUND_INFO", key, value)?;
         }
+        configuration.set_integer(
+            "WINDOW_RESOLVING",
+            "FULL_SCREEN_MONITOR_MODE",
+            self.platform.fullscreen_monitor_mode(),
+        )?;
         configuration.set_integer(
             "CMVS_RS_DESKTOP",
             "FULLSCREEN",

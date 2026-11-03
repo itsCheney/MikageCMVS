@@ -27,6 +27,7 @@ pub mod machine;
 pub mod math;
 pub mod message;
 pub mod message_flags;
+pub mod mgv;
 pub mod movie;
 pub mod patch;
 pub mod pb3;

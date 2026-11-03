@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/cmvs-core", "crates/cmvs-audio", "crates/cmvs-desktop", "crates/cmvs-native", "crates/cmvs-wgpu", "crates/cmvs-probe", "crates/cmvs-mobile"]
+members = ["crates/cmvs-core", "crates/cmvs-input", "crates/cmvs-font", "crates/cmvs-audio", "crates/cmvs-desktop", "crates/cmvs-native", "crates/cmvs-wgpu", "crates/cmvs-probe", "platforms/android/native", "crates/cmvs-mobile"]
 default-members = ["."]
 resolver = "3"
 
@@ -79,6 +79,11 @@ path = "src/bin/pb3.rs"
 [[bin]]
 name = "cmvs-cmv"
 path = "src/bin/cmv.rs"
+
+[[bin]]
+name = "cmvs-mgv"
+path = "src/bin/mgv.rs"
+required-features = ["desktop"]
 
 [[bin]]
 name = "cmvs-audio"

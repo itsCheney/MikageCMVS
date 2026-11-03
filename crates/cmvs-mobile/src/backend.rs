@@ -60,6 +60,14 @@ impl PlatformBackend for MobileBackend<'_> {
     fn pixel_shader_major(&self) -> Result<u8, Box<dyn Error>> {
         Ok(0)
     }
+    /// The device screen is the only display, whichever one the game asks for.
+    fn select_fullscreen_monitor(&mut self, mode: u32) -> Result<bool, Box<dyn Error>> {
+        self.apply(&PlatformRequest::FullscreenMonitor(mode))?;
+        Ok(mode == 5)
+    }
+    fn display_count(&self) -> Result<u32, Box<dyn Error>> {
+        Ok(1)
+    }
     fn apply(&mut self, request: &PlatformRequest) -> Result<(), Box<dyn Error>> {
         match request {
             PlatformRequest::WindowSize(size) => self.state.windowed_size = *size,
@@ -77,6 +85,11 @@ impl PlatformBackend for MobileBackend<'_> {
                 self.state.render_mode = *mode;
             }
             PlatformRequest::Fullscreen(on) => self.state.fullscreen = *on,
+            PlatformRequest::FullscreenMonitor(mode) => {
+                if *mode > 5 {
+                    return Err("unsupported fullscreen monitor mode".into());
+                }
+            }
             PlatformRequest::Title(_) | PlatformRequest::Icon { .. } => {}
             PlatformRequest::Cursor { id, .. } => {
                 crate::log::emit(crate::log::DEBUG, &format!("cursor {id}"))

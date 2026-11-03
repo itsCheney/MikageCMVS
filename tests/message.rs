@@ -64,6 +64,7 @@ fn created_text(position: [i32; 2], size: [u32; 2]) -> TextObject {
         font_face: Vec::new(),
         face: cmvs_rs::settings::DEFAULT_FONT_FACE.into(),
         bold: false,
+        revision_alpha: false,
         scale_bits: 1.0f32.to_bits(),
         logical_size: [1280, 720],
         position,
@@ -371,6 +372,44 @@ fn destroying_constructor_empty_windows_pops_the_slot_only() {
     assert_eq!(vm.state().system_integer(0), Some(9));
     assert!((0..MESSAGE_WINDOWS).all(|slot| messages.window(slot).is_none()));
     assert!((0..TEXT_OBJECTS).all(|index| messages.text(index).is_none()));
+}
+
+#[test]
+fn position_query_returns_moved_window_origin_and_preserves_other_results() {
+    let mut code = vec![];
+    create(&mut code, 0, 0, [10, (-20i32) as u32, 100, 80]);
+    call(&mut code, 0x2180, &[u32::MAX, 0]);
+    call(&mut code, 0x214f, &[77, 66, 0]); // Text pen is independent of the window.
+    call(&mut code, 0x2150, &[4, 3, 1, 0]); // Relative window move.
+    call(&mut code, 0x215e, &[0]);
+    let program = script(&code);
+    let mut vm = Machine::new(&program).unwrap();
+    let mut messages = MessageHost::default();
+    run(&mut vm, &mut messages, 4);
+    for slot in [0, 3, 4, 5, 6] {
+        vm.state_mut().set_system_integer(slot, 99).unwrap();
+    }
+    run(&mut vm, &mut messages, 1);
+    assert_eq!(vm.state().system_integer(1), Some(13));
+    assert_eq!(vm.state().system_integer(2), Some((-16i32) as u32));
+    for slot in [0, 3, 4, 5, 6] {
+        assert_eq!(vm.state().system_integer(slot), Some(99));
+    }
+    assert_eq!(messages.text(0).unwrap().cursor, [66, 77]);
+    assert_eq!(vm.stack().len_bytes(), 0);
+    for args in [vec![], vec![8], vec![u32::MAX], vec![1]] {
+        let mut code = vec![];
+        call(&mut code, 0x215e, &args);
+        let program = script(&code);
+        let mut vm = Machine::new(&program).unwrap();
+        pending(&mut vm);
+        let before = (vm.pc(), vm.pending_system(), vm.stack().len_bytes());
+        assert!(messages.shared_message(&mut vm).is_err());
+        assert_eq!(
+            (vm.pc(), vm.pending_system(), vm.stack().len_bytes()),
+            before
+        );
+    }
 }
 
 #[test]
@@ -2064,6 +2103,7 @@ fn configured_text_reveal_modes_durations_and_outline_only_affect_new_glyphs() {
             messages.set_record_output(true);
             messages.set_text_settings(TextOutputSettings {
                 bold: false,
+                revision_alpha: false,
                 speed: 3,
                 outline: 2,
                 reveal_mode: mode,
@@ -2081,6 +2121,7 @@ fn configured_text_reveal_modes_durations_and_outline_only_affect_new_glyphs() {
             // Changing the current settings must not re-time existing glyphs.
             messages.set_text_settings(TextOutputSettings {
                 bold: false,
+                revision_alpha: false,
                 speed: 10,
                 outline: 0,
                 reveal_mode: 0,
@@ -2136,6 +2177,7 @@ fn bold_updates_default_text_fonts_but_preserves_uploaded_glyphs_and_named_fonts
     for bold in [false, true] {
         messages.set_text_settings(TextOutputSettings {
             bold,
+            revision_alpha: bold,
             speed: 0,
             ..Default::default()
         });
@@ -2149,6 +2191,10 @@ fn bold_updates_default_text_fonts_but_preserves_uploaded_glyphs_and_named_fonts
         glyphs.iter().map(|g| g.bold).collect::<Vec<_>>(),
         [false, true]
     );
+    assert_eq!(
+        glyphs.iter().map(|g| g.revision_alpha).collect::<Vec<_>>(),
+        [false, true]
+    );
     // Set a named face via the bank; it retains its weight through global changes.
     vm.state_mut()
         .set_string(0, cmvs_rs::settings::DEFAULT_FONT_FACE)
@@ -2156,6 +2202,7 @@ fn bold_updates_default_text_fonts_but_preserves_uploaded_glyphs_and_named_fonts
     run(&mut vm, &mut messages, 1);
     messages.set_text_settings(TextOutputSettings {
         bold: false,
+        revision_alpha: false,
         speed: 0,
         ..Default::default()
     });
@@ -2165,6 +2212,7 @@ fn bold_updates_default_text_fonts_but_preserves_uploaded_glyphs_and_named_fonts
         .try_record_poll(&mut vm, wait_flags(false, false))
         .unwrap();
     assert!(messages.text(7).unwrap().glyphs[2].bold);
+    assert!(!messages.text(7).unwrap().glyphs[2].revision_alpha);
 }
 
 #[test]
@@ -3638,6 +3686,10 @@ fn window_presence_and_temporary_hiding() {
     call(&mut code, 0x214c, &[1, 2]);
     // Hiding the window clears the temporary flag.
     call(&mut code, 0x214e, &[0, 2]);
+    // Create a lower slot last, then show both windows.
+    create(&mut code, 0, 5, [0, 0, 100, 100]);
+    call(&mut code, 0x214e, &[1, 2]);
+    call(&mut code, 0x214e, &[1, 0]);
     let program = script(&code);
     let mut vm = Machine::new(&program).unwrap();
     let mut messages = MessageHost::default();
@@ -3650,14 +3702,28 @@ fn window_presence_and_temporary_hiding() {
     run(&mut vm, &mut messages, 2);
     let window = messages.window(2).unwrap();
     assert!(window.visible && window.hidden && !window.object.shown);
+    assert!(messages.visible_window_objects().next().is_none());
     assert!(!messages.text(7).unwrap().visible);
     run(&mut vm, &mut messages, 1);
     let window = messages.window(2).unwrap();
     assert!(!window.hidden && window.object.shown);
+    assert_eq!(
+        messages.visible_window_objects().collect::<Vec<_>>(),
+        [&window.object]
+    );
     assert!(messages.text(7).unwrap().visible);
     run(&mut vm, &mut messages, 2);
     let window = messages.window(2).unwrap();
     assert!(!window.visible && !window.hidden && !window.object.shown);
+    assert!(messages.visible_window_objects().next().is_none());
+    run(&mut vm, &mut messages, 3);
+    assert_eq!(
+        messages
+            .visible_window_objects()
+            .map(std::ptr::from_ref)
+            .collect::<Vec<_>>(),
+        [0, 2].map(|slot| std::ptr::from_ref(&messages.window(slot).unwrap().object))
+    );
     assert_eq!(vm.stack().len_bytes(), 0);
     for (command, words) in [
         (0x214bu16, vec![8]),
@@ -4764,4 +4830,36 @@ fn font_objects_keep_their_face_glyphs_capture_it_and_the_dialog_refreshes_defau
     // A new slot's font object takes the global face at creation.
     run(&mut vm, &mut messages, 1);
     assert_eq!(face(&messages, 9), b"New");
+}
+
+#[test]
+fn realive_window_children_share_the_extended_table_for_draw_query_and_destroy() {
+    let profile = cmvs_rs::profile::Registry::builtin()
+        .profile("cmvs-20190305")
+        .unwrap();
+    let mut code = vec![];
+    create(&mut code, 7, 10, [0, 0, 1280, 54]);
+    call(&mut code, 0x2178, &[1023, 7]);
+    call(&mut code, 0x2180, &[1023, 7]);
+    call(&mut code, 0x217b, &[1023, 7]);
+    call(&mut code, 0x2179, &[1024, 7]);
+    call(&mut code, 0x2179, &[1023, 7]);
+    call(&mut code, 0x217b, &[1023, 7]);
+    call(&mut code, 0x2178, &[1024, 7]);
+    let script = script(&code);
+    let mut vm = Machine::new(&script).unwrap();
+    let mut messages = MessageHost::for_profile(profile);
+    run(&mut vm, &mut messages, 4);
+    assert_eq!(vm.state().system_integer(0), Some(1));
+    let before = messages.window(7).unwrap().object.clone();
+    assert!(before.children[&1023].draw.is_some());
+    run(&mut vm, &mut messages, 1);
+    assert_eq!(messages.window(7).unwrap().object, before);
+    run(&mut vm, &mut messages, 2);
+    assert_eq!(vm.state().system_integer(0), Some(0));
+    assert!(messages.window(7).unwrap().object.children.is_empty());
+    pending(&mut vm);
+    assert!(messages.shared_message(&mut vm).is_err());
+    assert_eq!(vm.stack().len_bytes(), 8);
+    assert_eq!(vm.pending_system().unwrap().1, 0x178);
 }
