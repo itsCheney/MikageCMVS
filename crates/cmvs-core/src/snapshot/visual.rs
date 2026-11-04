@@ -1,6 +1,6 @@
 //! Bounded, version-specific visual records. This is an offline component preview,
 //! never a replacement for the engine snapshot loader. Evidence: snapshot-format.md.
-use super::{SnapshotRecord, parse_records, unique_body};
+use super::{SnapshotLayout, SnapshotRecord, parse_records, unique_body};
 use crate::{
     FormatError,
     image::{self, ImageSource},
@@ -28,6 +28,134 @@ mod tests {
         fn read(&mut self, _: &[u8]) -> Result<Option<Vec<u8>>, Box<dyn Error>> {
             panic!("retained replacement resources must not be loaded");
         }
+    }
+
+    #[test]
+    fn v1_world_tracks_restore_and_continue_without_losing_axes_or_timing() {
+        use crate::scene::{MotionKey, MotionPlayback, WorldMotion};
+        let layout = SnapshotLayout::TextV1SceneV1;
+        for mode in [0x20, 0x21, 0x00c80030, 0x00c80040] {
+            let mut track = WorldMotion {
+                playback: Some(MotionPlayback {
+                    base: [1f32.to_bits(), 2f32.to_bits(), 0x80000000],
+                    start: 0,
+                    current: 0,
+                    elapsed: 100,
+                }),
+                ..Default::default()
+            };
+            track.keys[0] = MotionKey {
+                next: -1,
+                xyz: [4f32.to_bits(), 5f32.to_bits(), 6f32.to_bits()],
+                mode,
+                duration: 400,
+            };
+            let mut object = SceneObject {
+                draw: Some(DrawState {
+                    world_motion: Some(Box::new(track.clone())),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            };
+            object.draw.as_mut().unwrap().words[11..14]
+                .copy_from_slice(&track.playback.as_ref().unwrap().base);
+            let saved = SavedScene::from_object(&object).unwrap();
+            let bytes = saved.encode_with_layout(layout).unwrap();
+            let decoded = SavedScene::decode_with_layout(&bytes, 0, &mut 0, layout).unwrap();
+            let loaded = decoded.load(&mut NoImages, &mut 0).unwrap();
+            assert_eq!(
+                loaded.draw.as_ref().unwrap().world_motion.as_deref(),
+                Some(&track)
+            );
+            let mut scene =
+                SceneHost::snapshot_preview(ClearState::default(), BTreeMap::from([(20, loaded)]));
+            scene.advance_frame(100);
+            let draw = scene.object(20).unwrap().draw.as_ref().unwrap();
+            let middle = match mode {
+                0x20 => 3f32,
+                0x21 => 2.25,
+                0x00c80040 => 2.0,
+                _ => 0.0,
+            };
+            assert_eq!(
+                &draw.words[11..14],
+                &[1f32.to_bits(), middle.to_bits(), 0x80000000]
+            );
+            if mode == 0x00c80040 {
+                scene.advance_frame(100);
+                let draw = scene.object(20).unwrap().draw.as_ref().unwrap();
+                assert_eq!(
+                    &draw.words[11..14],
+                    &[(-1f32).to_bits(), 2f32.to_bits(), 0x80000000]
+                );
+                scene.advance_frame(100);
+            } else {
+                scene.advance_frame(200);
+            }
+            let draw = scene.object(20).unwrap().draw.as_ref().unwrap();
+            assert_eq!(&draw.words[11..14], &track.keys[0].xyz);
+            assert!(draw.world_motion.is_none());
+            assert!(SavedScene::decode(&bytes, 0, &mut 0).is_err());
+        }
+    }
+
+    #[test]
+    fn realive_scene_header_and_nested_child_limits_are_layout_specific() {
+        let layout = SnapshotLayout::TextV3SceneV4;
+        let mut parent = SceneObject {
+            flags: 0x8000_0000,
+            logical_size: [1280, 720],
+            ..SceneObject::default()
+        };
+        parent.children.insert(1023, SceneObject::default());
+        let saved = SavedScene::from_object(&parent).unwrap();
+        let bytes = saved.encode_with_layout(layout).unwrap();
+        assert_eq!(&bytes[..4], &[255, 255, 4, 0]);
+        assert_eq!(&bytes[16..24], &[0, 5, 0, 0, 208, 2, 0, 0]);
+        assert_eq!(
+            SavedScene::decode_with_layout(&bytes, 0, &mut 0, layout).unwrap(),
+            saved
+        );
+        assert!(SavedScene::decode(&bytes, 0, &mut 0).is_err());
+        assert!(saved.encode().is_err());
+
+        let state = MessageWindow {
+            text: 0,
+            visible: true,
+            hidden: false,
+            position: [0; 2],
+            switch_positions: [[0; 2]; 2],
+            size: [1280, 720],
+            cursor_mode: 0,
+            cursor_offset: [0; 2],
+            position_switch: false,
+            object: SceneObject::default(),
+            buttons: [crate::message::WindowButton::default(); 32],
+            pressed_button: -1,
+            switch_state: 0,
+        };
+        let mut window = SavedWindow::from_window(&state, [1280, 720]).unwrap();
+        window.scene = saved.clone();
+        let bytes = window::encode_with_layout(&window, layout).unwrap();
+        assert_eq!(
+            window::decode_with_layout(&bytes, &mut 0, layout)
+                .unwrap()
+                .scene,
+            saved
+        );
+        assert!(window::decode(&bytes, &mut 0).is_err());
+
+        let mut invalid = saved;
+        let leaf = invalid.children.remove(&1023).unwrap();
+        invalid.children.insert(1024, leaf);
+        assert!(invalid.encode_with_layout(layout).is_err());
+        // Put an invalid child index into the otherwise valid native record.
+        let mut parent = SavedScene::from_object(&parent)
+            .unwrap()
+            .encode_with_layout(layout)
+            .unwrap();
+        parent[70..72].copy_from_slice(&1024u16.to_le_bytes());
+        assert!(SavedScene::decode_with_layout(&parent, 0, &mut 0, layout).is_err());
     }
 
     #[test]
@@ -69,7 +197,10 @@ mod tests {
             let bytes = saved.encode();
             assert_eq!(bytes.len(), 54);
             assert_eq!(original, before);
-            assert_eq!(SavedImage::decode(&bytes).unwrap(), saved);
+            assert_eq!(
+                SavedImage::decode_with_layout(&bytes, SnapshotLayout::TextV3).unwrap(),
+                saved
+            );
             let mut budget = 8;
             let loaded = saved.load(&mut NoImages, &mut budget).unwrap();
             assert_eq!(budget, 0);
@@ -216,6 +347,19 @@ fn words(out: &mut Vec<u8>, words: &[u32]) {
 }
 
 impl SavedImage {
+    fn encode_with_layout(&self, layout: SnapshotLayout) -> Result<Vec<u8>, FormatError> {
+        let mut bytes = self.encode();
+        if layout == SnapshotLayout::TextV1SceneV1 {
+            if self.surface == Some(true) {
+                return Err(FormatError(
+                    "snapshot image v2 surfaces are not implemented",
+                ));
+            }
+            bytes[..4].copy_from_slice(&2u32.to_le_bytes());
+            bytes.drain(36..40);
+        }
+        Ok(bytes)
+    }
     /// Image writer 0x140030030 for file, anonymous kind-0 and surface branches.
     pub(crate) fn encode(&self) -> Vec<u8> {
         let (enabled, params) = match self.filter {
@@ -253,10 +397,18 @@ impl SavedImage {
             surface: image.surface.then_some(image.alpha),
         })
     }
-    fn decode(bytes: &[u8]) -> Result<Self, FormatError> {
+    fn decode_with_layout(bytes: &[u8], layout: SnapshotLayout) -> Result<Self, FormatError> {
+        let text_v1_scene_v1 = layout == SnapshotLayout::TextV1SceneV1;
         let mut r = Reader::new(bytes);
-        let h = r.words::<10>()?;
-        if h[0] != 3 {
+        let h = if text_v1_scene_v1 {
+            let v2_header = r.words::<9>()?;
+            let mut h = [0; 10];
+            h[..9].copy_from_slice(&v2_header);
+            h
+        } else {
+            r.words::<10>()?
+        };
+        if h[0] != if text_v1_scene_v1 { 2 } else { 3 } {
             return Err(FormatError("unsupported snapshot image version"));
         }
         // Kind 3 is a blank surface with its alpha flag; the loader ignores its filter.
@@ -273,7 +425,9 @@ impl SavedImage {
             return Err(FormatError("unsupported snapshot image filter flag"));
         }
         let filter = (h[5] != 0).then_some([h[6], h[7], h[8]]);
-        if filter.is_some_and(|p| !matches!(p[0], 2 | 17 | 256 | 512)) {
+        if filter
+            .is_some_and(|p| !(matches!(p[0], 2 | 17 | 256 | 512) || text_v1_scene_v1 && p[0] == 1))
+        {
             return Err(FormatError("unsupported snapshot image filter"));
         }
         let name = r.string(64)?.to_vec();
@@ -382,6 +536,14 @@ impl SavedScene {
         depth: usize,
         nodes: &mut usize,
     ) -> Result<Self, FormatError> {
+        Self::decode_with_layout(bytes, depth, nodes, SnapshotLayout::TextV3)
+    }
+    pub(super) fn decode_with_layout(
+        bytes: &[u8],
+        depth: usize,
+        nodes: &mut usize,
+        layout: SnapshotLayout,
+    ) -> Result<Self, FormatError> {
         if depth > MAX_DEPTH || *nodes == MAX_NODES {
             return Err(FormatError(
                 "snapshot scene nesting or node budget exceeded",
@@ -389,10 +551,29 @@ impl SavedScene {
         }
         *nodes += 1;
         let mut r = Reader::new(bytes);
-        if r.u16()? != 0xffff || r.u16()? != 3 {
+        let scene_v4 = layout == SnapshotLayout::TextV3SceneV4;
+        let text_v1_scene_v1 = layout == SnapshotLayout::TextV1SceneV1;
+        if r.u16()? != 0xffff
+            || r.u16()?
+                != if text_v1_scene_v1 {
+                    1
+                } else if scene_v4 {
+                    4
+                } else {
+                    3
+                }
+        {
             return Err(FormatError("unsupported snapshot scene version"));
         }
-        let h = r.words::<8>()?;
+        let h = if scene_v4 {
+            let h = r.words::<5>()?;
+            [h[0], h[1], h[2], 0, 0, 0, h[3], h[4]]
+        } else if text_v1_scene_v1 {
+            let h = r.words::<6>()?;
+            [h[0], h[1], h[2], h[3], 0, 0, h[4], h[5]]
+        } else {
+            r.words::<8>()?
+        };
         if h[0] > 1 || h[3..6] != [0; 3] {
             return Err(FormatError("unsupported snapshot scene kind or metadata"));
         }
@@ -407,10 +588,12 @@ impl SavedScene {
                 r.u16()?;
                 let bytes = r.chunk()?;
                 match tag {
-                    0x740 => image = Some(SavedImage::decode(bytes)?),
-                    0x741 => secondary_image = Some(SavedImage::decode(bytes)?),
-                    0x749 => collision_vertices = Some(collision::decode(bytes)?),
-                    0x780 => draw = Some(draw::decode(bytes)?),
+                    0x740 => image = Some(SavedImage::decode_with_layout(bytes, layout)?),
+                    0x741 => secondary_image = Some(SavedImage::decode_with_layout(bytes, layout)?),
+                    0x749 if !text_v1_scene_v1 => {
+                        collision_vertices = Some(collision::decode(bytes)?)
+                    }
+                    0x780 => draw = Some(draw::decode_with_layout(bytes, layout)?),
                     _ => {
                         return Err(FormatError(
                             "snapshot scene special image or effect is not implemented",
@@ -422,7 +605,11 @@ impl SavedScene {
         if (h[0] == 1) != draw.is_some() {
             return Err(FormatError("snapshot scene kind disagrees with draw state"));
         }
-        let effect_words = r.words::<11>()?;
+        let effect_words = if text_v1_scene_v1 {
+            [0; 11]
+        } else {
+            r.words::<11>()?
+        };
         if effect_words[0] != 0 {
             return Err(FormatError(
                 "snapshot scene image change is not implemented",
@@ -433,10 +620,13 @@ impl SavedScene {
             r.u16()?;
             let slot = r.u16()?;
             let body = r.chunk()?;
-            if slot >= 768 || children.contains_key(&slot) {
+            if slot >= layout.child_slots() || children.contains_key(&slot) {
                 return Err(FormatError("snapshot child slot is invalid or duplicated"));
             }
-            children.insert(slot, Self::decode(body, depth + 1, nodes)?);
+            children.insert(
+                slot,
+                Self::decode_with_layout(body, depth + 1, nodes, layout)?,
+            );
         }
         if !children.is_empty() && h[2] & 0x8000_0000 == 0 {
             return Err(FormatError("snapshot children lack inheritance flag"));
@@ -458,39 +648,73 @@ impl SavedScene {
         })
     }
     /// Scene writer 0x14003a4a0 for the supported subset (see `decode`).
+    #[cfg(test)]
     pub(crate) fn encode(&self) -> Result<Vec<u8>, FormatError> {
+        self.encode_with_layout(SnapshotLayout::TextV3)
+    }
+    pub(crate) fn encode_with_layout(
+        &self,
+        layout: SnapshotLayout,
+    ) -> Result<Vec<u8>, FormatError> {
         let mut out = 0xffffu16.to_le_bytes().to_vec();
-        out.extend(3u16.to_le_bytes());
-        words(
-            &mut out,
-            &[
-                u32::from(self.draw.is_some()),
-                u32::from(self.shown),
-                self.flags,
-                0,
-                0,
-                0,
-                self.logical_size[0],
-                self.logical_size[1],
-            ],
+        let scene_v4 = layout == SnapshotLayout::TextV3SceneV4;
+        let text_v1_scene_v1 = layout == SnapshotLayout::TextV1SceneV1;
+        if text_v1_scene_v1 && (self.collision_vertices.is_some() || self.effect_words != [0; 11]) {
+            return Err(FormatError(
+                "scene v1 has no collision or image-change representation",
+            ));
+        }
+        out.extend(
+            if text_v1_scene_v1 {
+                1u16
+            } else if scene_v4 {
+                4u16
+            } else {
+                3u16
+            }
+            .to_le_bytes(),
         );
+        let header = [
+            u32::from(self.draw.is_some()),
+            u32::from(self.shown),
+            self.flags,
+            0,
+            0,
+            0,
+            self.logical_size[0],
+            self.logical_size[1],
+        ];
+        if scene_v4 {
+            words(&mut out, &header[..3]);
+            words(&mut out, &header[6..]);
+        } else if text_v1_scene_v1 {
+            words(&mut out, &header[..4]);
+            words(&mut out, &header[6..]);
+        } else {
+            words(&mut out, &header);
+        }
         if let Some(image) = &self.image {
-            chunk(&mut out, 0x740, &image.encode());
+            chunk(&mut out, 0x740, &image.encode_with_layout(layout)?);
         }
         if let Some(image) = &self.secondary_image {
-            chunk(&mut out, 0x741, &image.encode());
+            chunk(&mut out, 0x741, &image.encode_with_layout(layout)?);
         }
         if let Some(vertices) = &self.collision_vertices {
             chunk(&mut out, 0x749, &collision::encode(vertices)?);
         }
         if let Some(draw) = &self.draw {
-            chunk(&mut out, 0x780, &draw::encode(draw)?);
+            chunk(&mut out, 0x780, &draw::encode_with_layout(draw, layout)?);
         }
-        words(&mut out, &self.effect_words);
+        if !text_v1_scene_v1 {
+            words(&mut out, &self.effect_words);
+        }
         for (&slot, child) in &self.children {
+            if slot >= layout.child_slots() {
+                return Err(FormatError("snapshot child slot is invalid or duplicated"));
+            }
             out.extend(0x700u16.to_le_bytes());
             out.extend(slot.to_le_bytes());
-            let body = child.encode()?;
+            let body = child.encode_with_layout(layout)?;
             out.extend((body.len() as u32).to_le_bytes());
             out.extend(body);
         }

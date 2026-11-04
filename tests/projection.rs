@@ -125,10 +125,12 @@ fn projected(code: &mut Vec<u8>, slot: u32, name: u32, world: [f32; 3], referenc
 }
 /// Runs every command of `code` through the scene and camera hosts.
 fn build(code: &[u8]) -> (SceneHost, CameraHost) {
+    build_with_cameras(code, CameraHost::default())
+}
+fn build_with_cameras(code: &[u8], mut cameras: CameraHost) -> (SceneHost, CameraHost) {
     let script = script(code);
     let mut vm = Machine::new(&script).unwrap();
     let mut scene = SceneHost::default();
-    let mut cameras = CameraHost::default();
     let mut files = files();
     while vm.pc() < code.len() {
         while !matches!(vm.step().unwrap(), Step::System { .. }) {}
@@ -141,6 +143,116 @@ fn build(code: &[u8]) -> (SceneHost, CameraHost) {
         );
     }
     (scene, cameras)
+}
+
+#[test]
+fn type_one_projection_keeps_its_scale_fade_and_profile_boundary() {
+    let profile = cmvs_rs::profile::Registry::builtin()
+        .profile("cmvs-20071117")
+        .unwrap();
+    let mut code = vec![];
+    camera(&mut code);
+    command(&mut code, 0x205f, &[0, 1]);
+    let (_, cameras) = build_with_cameras(&code, CameraHost::for_profile(profile));
+    for (depth, reference, x, scale, fade) in [
+        (10.0, 10.0, 5.0, 1.0, 255),
+        (8.0, 10.0, 5.25, 2.0, 255),
+        (12.0, 10.0, 4.8333335, 0.5, 255),
+        (0.25, 0.25, 44.0, 1.0, 128),
+    ] {
+        let p = cameras
+            .project_object(0, [1.0, 0.0, depth], 0.0, reference)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            (p.position, p.depth, p.scale, p.fade),
+            ([x, 2.0], depth, scale, fade)
+        );
+    }
+    for depth in [-1.0, 0.0, f32::NAN] {
+        assert_eq!(
+            cameras.project_object(0, [0.0, 0.0, depth], 0.0, 10.0),
+            Ok(None)
+        );
+    }
+    command(&mut code, 0x205c, &[0, f(3.0)]);
+    command(&mut code, 0x205d, &[0, f(99.0), f(99.0)]);
+    let (_, cameras) = build_with_cameras(&code, CameraHost::for_profile(profile));
+    assert_eq!(
+        cameras
+            .project_object(0, [2.0, 1.0, 8.0], 0.5, 10.0)
+            .unwrap()
+            .unwrap()
+            .position,
+        [6.5, 7.25]
+    );
+    let mut changed = profile.clone();
+    changed.binaries[0].sha256 = [0; 32];
+    let (_, unknown) = build_with_cameras(&code, CameraHost::for_profile(&changed));
+    assert!(
+        unknown
+            .project_object(0, [0.0, 0.0, 10.0], 0.0, 10.0)
+            .is_err()
+    );
+    let mut other = profile.clone();
+    other.id = "synthetic-unverified".into();
+    let (_, unknown) = build_with_cameras(&code, CameraHost::for_profile(&other));
+    assert!(
+        unknown
+            .project_object(0, [0.0, 0.0, 10.0], 0.0, 10.0)
+            .is_err()
+    );
+}
+
+#[test]
+fn type_one_objects_reach_the_common_renderer() {
+    let profile = cmvs_rs::profile::Registry::builtin()
+        .profile("cmvs-20071117")
+        .unwrap();
+    let mut code = vec![];
+    camera(&mut code);
+    command(&mut code, 0x205f, &[0, 1]);
+    projected(&mut code, 1, 0, [1.0, 0.0, 10.0], 10.0);
+    let (scene, cameras) = build_with_cameras(&code, CameraHost::for_profile(profile));
+    let image = scene_render::render_scene(&scene, Some(&cameras), &[], 8, 4).unwrap();
+    assert_eq!(
+        &image.pixels()[(2 * 8 + 5) * 4..(2 * 8 + 7) * 4],
+        &[0, 0, 0, 255, 200, 100, 40, 255]
+    );
+    let (_, cameras) = build(&code);
+    assert!(scene_render::render_scene(&scene, Some(&cameras), &[], 8, 4).is_err());
+    command(&mut code, 0x205f, &[0, 3]);
+    let (scene, cameras) = build_with_cameras(&code, CameraHost::for_profile(profile));
+    assert!(scene_render::render_scene(&scene, Some(&cameras), &[], 8, 4).is_err());
+}
+
+#[test]
+fn type_two_preserves_vertical_scale_height_bias_and_near_clip() {
+    let profile = cmvs_rs::profile::Registry::builtin()
+        .profile("cmvs-20071117")
+        .unwrap();
+    let mut code = vec![];
+    camera(&mut code);
+    command(&mut code, 0x205f, &[0, 2]);
+    command(&mut code, 0x205c, &[0, f(3.0)]);
+    command(&mut code, 0x205d, &[0, f(6.0), f(3.0)]);
+    let (_, cameras) = build_with_cameras(&code, CameraHost::for_profile(profile));
+    let p = cameras
+        .project_object(0, [2.0, 1.0, 20.0], 0.5, 20.0)
+        .unwrap()
+        .unwrap();
+    assert_eq!((p.position, p.scale, p.fade), ([7.0, 3.4], 1.0, 255));
+    for depth in [-1.0, 0.0, 9.0, f32::NAN] {
+        assert_eq!(
+            cameras.project_object(0, [0.0, 0.0, depth], 0.0, 10.0),
+            Ok(None)
+        );
+    }
+    let p = cameras
+        .project_object(0, [0.0, 0.0, 9.5], 0.0, 19.0)
+        .unwrap()
+        .unwrap();
+    assert_eq!((p.scale, p.fade), (4.0, 128));
 }
 fn render(code: &[u8]) -> Vec<[u8; 3]> {
     let (scene, cameras) = build(code);
@@ -304,15 +416,49 @@ fn objects_fade_in_between_depth_nine_and_ten_and_vanish_nearer() {
 }
 
 #[test]
+fn camera_roll_rotates_about_screen_center_after_object_rotation() {
+    let mut code = vec![];
+    camera(&mut code);
+    projected(&mut code, 1, 6, [0.0, 0.0, 10.0], 10.0);
+    command(&mut code, 0x205b, &[0, f(90.0)]);
+    let frame = render(&code);
+    for y in 0..4 {
+        for x in 0..8 {
+            assert_eq!(
+                frame[y * 8 + x],
+                if x == 3 && y >= 2 { [255; 3] } else { [0; 3] }
+            );
+        }
+    }
+    // Compose the local object angle first, then roll its device-space vertices.
+    command(&mut code, 0x204a, &[1, u32::MAX, 90]);
+    let frame = render(&code);
+    for y in 0..4 {
+        for x in 0..8 {
+            assert_eq!(
+                frame[y * 8 + x],
+                if (2..4).contains(&x) && y == 1 {
+                    [255; 3]
+                } else {
+                    [0; 3]
+                }
+            );
+        }
+    }
+    // Setter normalizes negative and multi-turn angles before rendering.
+    command(&mut code, 0x205b, &[0, f(-450.0)]);
+    assert_eq!(render(&code), frame);
+}
+
+#[test]
 fn unverified_projection_paths_fail_explicitly() {
     let mut base = vec![];
     camera(&mut base);
     projected(&mut base, 1, 0, [0.0, 0.0, 10.0], 10.0);
     let (scene, _) = build(&base);
     assert!(scene_render::render(&scene, 8, 4).is_err());
-    let variants: [&[(u16, &[u32])]; 5] = [
+    let variants: [&[(u16, &[u32])]; 4] = [
         &[(0x205f, &[0, 1])],
-        &[(0x205b, &[0, f(10.0)])],
         &[(0x209c, &[0, 1])],
         &[(0x2022, &[1, 0]), (0x2040, &[1])],
         &[(0x222a, &[12, 1, 100, 50, 1])],
@@ -395,6 +541,8 @@ fn non_finite_projected_extents_are_reported_and_near_nan_depth_is_clipped() {
     let mut code = vec![];
     camera(&mut code);
     projected(&mut code, 1, 0, [f32::INFINITY, 0.0, 10.0], 10.0);
+    assert!(rejected(&code));
+    command(&mut code, 0x205b, &[0, f(90.0)]);
     assert!(rejected(&code));
     command(&mut code, 0x2074, &[1, u32::MAX, f(f32::NAN)]);
     assert!(render(&code).iter().all(|p| *p == [0; 3]));

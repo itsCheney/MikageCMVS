@@ -6,6 +6,10 @@
 
 命令状态继承不代表快照格式继承。默认 `EngineSnapshot::decode/encode` 使用本文的文字v3布局；`decode_with_layout/encode_with_layout` 可显式选择文字v2。runner对独立核对的 `cmvs-20130131` / `cmvs-20150405` 选择v2，`cmvs-20171114` 选择v3（[Aoitori证据与边界](../games/aoitori/vm-semantics.md#剧情快照-v3-子集2026-11-02)），其余未知派生档案仍报格式未实现。v2省略文字记录的208字节禁则块，不支持扩展禁则状态；公共图像及活动场景效果的未支持子记录继续拒绝。20130131另拒绝按钮列表及≥512的子槽，见[Hapymaher证据](../games/hapymaher/vm-semantics.md#剧情快照-v2-子集2026-11-02)；其他v2证据见[CHRONOCLOCK](../games/chronoclock/vm-semantics.md#剧情快照文字v2布局2026-11-01)。
 
+REALIVE（`cmvs-20190305`）独立选择 `TextV3SceneV4`：文字 v3、消息窗口 v3、场景 v4。场景头只保留 kind/shown/flags/width/height 五个 u32，递归子槽上限 1024；旧布局保留 768。必须用 `decode_with_layout/encode_with_layout` 显式选择；默认 API 仍为基准布局。证据与验证边界见 [REALIVE 快照](../games/realive/README.md#剧情快照2026-11-03)。
+
+`TextV1SceneV1` 对应已独立核对的文字/窗口/场景 v1、绘制状态 v3、图像/相机/场景视频 v2。文字不存逻辑尺寸，加载时取设备尺寸；窗口有 16 个按钮，场景递归子槽上限 256，帧动画有 32 项。记录流省略 `0x6e0`，BGM 为单个 `0x300` 短字符串，不能作为现代 `0x304` 双字符串解析。运行时仅由 `cmvs-20071117` 和已登记二进制哈希启用；布局名称本身不证明某个构建兼容。旧 mask/粒子及其他未核对记录继续拒绝，详见 [Asukimi 快照](../games/asukimi/README.md#旧版-snapshottextv1scenev1)。
+
 ## 何时生成、由谁消费
 
 - 0x2080 / `0x1400810f0`：先由 `0x140080530` 装载主脚本，再调用 0x140069270，返回 0（不前进 PC、不回收参数）。
@@ -199,7 +203,7 @@ SavedImage现允许这类空名普通图像，无需ImageSource；保持54字节
 
 ### Aoitori 活动效果 0x800
 
-独立核对的Aoitori档案支持 `SavedEffect`：版本1，类型2/5为60字节，类型6为52字节；配置word及32字节NUL结尾图名见[Aoitori证据](../games/aoitori/vm-semantics.md#活动效果快照-0x8002026-11-02)。解码保留名称填充，拒绝未知类型/版本、长度错误及不安全参数。类型8仅4字节，原版读取器将其恢复为空，运行时遵循此规则。其他档案的活动效果仍拒绝。
+独立核对的Aoitori档案支持 `SavedEffect`：版本1，类型2/5为60字节，类型6为52字节；配置word及32字节NUL结尾图名见[Aoitori证据](../games/aoitori/vm-semantics.md#活动效果快照-0x8002026-11-02)。解码保留名称填充，拒绝未知类型/版本、长度错误及不安全参数。类型8仅4字节，原版读取器将其恢复为空，运行时遵循此规则。MIRANOSU 与 [Kunado](../games/kunado/README.md#剧情快照2026-11-03) 仅开放各自独立核对的 type 5；其他未核对档案或类型仍拒绝。
 
 运行时按效果槽顺序重新加载图像并消费共享CRT随机数初始化，不恢复保存时的粒子位置；候选恢复失败不提交池或随机数。场景碰撞顶点0x749已在共享编解码器开放；其他未知效果及复合图像仍不在开放范围。真实类型5保存点仅验证同会话读回与立即字节往返，不代表原版存档互操作。
 

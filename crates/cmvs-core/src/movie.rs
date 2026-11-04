@@ -9,11 +9,12 @@
 //! active; 0x230b/0x230c resume/pause while retaining the frame. Other slot controls,
 //! playback modes, audio-bearing slots and the other creation
 //! variant remain unhandled.
+use crate::filesystem::File;
 use crate::{
     audio::MovieAudioClock, bytecode::DecodeError, cmv::CmvIndex, dispatch::Call, evaluate::error,
     machine::Machine, platform::resolve_under,
 };
-use std::{error::Error, fs::File, io, path::Path};
+use std::{error::Error, io, path::Path};
 
 pub const MOVIE_SLOTS: usize = 3;
 mod cmv_player;
@@ -246,6 +247,47 @@ pub struct MovieHost {
 }
 
 impl MovieHost {
+    pub(crate) fn saved_scene_players_with_layout(
+        &self,
+        layout: crate::snapshot::SnapshotLayout,
+    ) -> Vec<(u16, Vec<u8>)> {
+        let mut records = self.saved_scene_players();
+        if layout == crate::snapshot::SnapshotLayout::TextV1SceneV1 {
+            // 0x41f1a0: v2 omits v4's three trailing control/mode words.
+            for (_, body) in &mut records {
+                body[..2].copy_from_slice(&2u16.to_le_bytes());
+                body.truncate(286);
+            }
+        }
+        records
+    }
+
+    pub(crate) fn load_scene_players_with_layout(
+        &self,
+        records: &[(u16, &[u8])],
+        objects: &mut std::collections::BTreeMap<u8, crate::scene::SceneObject>,
+        source: &mut dyn crate::resources::ResourceSource,
+        layout: crate::snapshot::SnapshotLayout,
+    ) -> Result<[Option<SceneMovie>; MOVIE_SLOTS], Box<dyn Error>> {
+        if layout != crate::snapshot::SnapshotLayout::TextV1SceneV1 {
+            return self.load_scene_players(records, objects, source);
+        }
+        let mut converted = Vec::new();
+        for &(slot, body) in records {
+            if body.len() != 286 || body[..2] != [2, 0] {
+                return Err("unsupported scene movie v2 record".into());
+            }
+            let mut bytes = body.to_vec();
+            bytes[..2].copy_from_slice(&4u16.to_le_bytes());
+            for word in [0, SCENE_MODE, 0] {
+                bytes.extend(word.to_le_bytes());
+            }
+            converted.push((slot, bytes));
+        }
+        let records: Vec<_> = converted.iter().map(|(s, b)| (*s, b.as_slice())).collect();
+        self.load_scene_players(&records, objects, source)
+    }
+
     pub fn set_mgv_factory(&mut self, factory: Box<dyn crate::mgv::DecoderFactory>) {
         self.mgv_factory = Some(factory);
     }

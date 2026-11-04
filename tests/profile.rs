@@ -891,9 +891,26 @@ fn embedded_profiles_parse_and_bind_the_recorded_games() {
     let realive = registry.profile("cmvs-20190305").unwrap();
     assert_eq!(realive.base.as_deref(), Some("cmvs-20160201"));
     assert_eq!(realive.count(CommandStatus::Unreviewed), 749);
+    let seishunf = registry.profile("cmvs-20190405").unwrap();
+    assert_eq!(seishunf.base.as_deref(), Some("cmvs-20160201"));
+    assert_eq!(seishunf.count(CommandStatus::Unreviewed), 749);
+    let kunado = registry.profile("cmvs-20211006").unwrap();
+    let hapymaher_re = registry.profile("cmvs-20221105").unwrap();
+    assert_eq!(hapymaher_re.base.as_deref(), Some("cmvs-20160201"));
+    assert_eq!(kunado.base.as_deref(), Some("cmvs-20160201"));
+    assert_eq!(kunado.count(CommandStatus::Unreviewed), 749);
     let miranosu = registry.profile("cmvs-20110525").unwrap();
     assert_eq!(miranosu.base.as_deref(), Some("cmvs-20160201"));
     assert_eq!(miranosu.count(CommandStatus::Unreviewed), 614);
+    let kazokubu = registry.profile("cmvs-20120309").unwrap();
+    assert_eq!(kazokubu.base.as_deref(), Some("cmvs-20160201"));
+    assert_eq!(kazokubu.count(CommandStatus::Unreviewed), 620);
+    let asukimi = registry.profile("cmvs-20071117").unwrap();
+    assert_eq!(asukimi.base.as_deref(), Some("cmvs-20160201"));
+    assert_eq!(asukimi.binaries.len(), 1);
+    assert_eq!(asukimi.statuses().len(), 864);
+    assert_eq!(asukimi.count(CommandStatus::Unreviewed), 519);
+    assert_eq!(asukimi.count(CommandStatus::NoOp), 345);
     let hapymaher = registry.profile("cmvs-20130131").unwrap();
     let hapymaherfd = registry.profile("cmvs-20140217").unwrap();
     assert_eq!(hapymaherfd.base.as_deref(), Some("cmvs-20160201"));
@@ -906,10 +923,14 @@ fn embedded_profiles_parse_and_bind_the_recorded_games() {
     assert_eq!(hapymaher.status(0x3a0), CommandStatus::Absent);
     for (profile, cases, handlers, noops) in [
         (miranosu, 864, 614, 250),
+        (kazokubu, 864, 620, 244),
         (base, 976, 721, 255),
         (chrono, 976, 712, 264),
         (aoitori, 992, 734, 258),
         (realive, 992, 749, 243),
+        (seishunf, 992, 749, 243),
+        (kunado, 992, 749, 243),
+        (hapymaher_re, 992, 749, 243),
         (hapymaher, 928, 639, 289),
         (hapymaherfd, 976, 701, 275),
     ] {
@@ -937,13 +958,18 @@ fn embedded_profiles_parse_and_bind_the_recorded_games() {
     assert_eq!(
         games,
         [
+            ("asukimi", "cmvs-20071117", None),
             ("miranosu", "cmvs-20110525", None),
+            ("kazokubu", "cmvs-20120309", None),
             ("hapymaher", "cmvs-20130131", None),
             ("hapymaherfd", "cmvs-20140217", None),
             ("chronoclock", "cmvs-20150405", None),
             ("amatsutsumi", "cmvs-20160201", Some(2198)),
             ("aoitori", "cmvs-20171114", None),
-            ("realive", "cmvs-20190305", None)
+            ("realive", "cmvs-20190305", None),
+            ("seishunf", "cmvs-20190405", None),
+            ("kunado", "cmvs-20211006", None),
+            ("hapymaher_re", "cmvs-20221105", None)
         ]
     );
 }

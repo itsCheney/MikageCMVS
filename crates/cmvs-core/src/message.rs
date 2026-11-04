@@ -213,6 +213,8 @@ pub trait GlyphMetrics: std::fmt::Debug {
 #[derive(Debug, Default)]
 pub struct MessageHost {
     child_slots: crate::scene::ChildSlots,
+    /// Inspected 2007 text creation uses eight slots and accepts explicit faces.
+    legacy_text_creation: bool,
     screen_size: crate::viewport::ScreenSize,
     /// State owned by the separately dispatched font-cell text implementation.
     font_cells: font_cells::State,
@@ -243,6 +245,7 @@ impl MessageHost {
     pub fn for_profile(profile: &crate::profile::EngineProfile) -> Self {
         Self {
             child_slots: crate::scene::ChildSlots::for_profile(profile),
+            legacy_text_creation: profile.is_inspected_20071117(),
             ..Self::default()
         }
     }
@@ -673,7 +676,7 @@ impl MessageHost {
             0x17b => self.object_presence(call),
             0x171 => self.release_image(call),
             0x179 => self.destroy_child(call),
-            0x17a | 0x17c | 0x180 | 0x182..=0x186 => self.draw(call),
+            0x17a | 0x17c | 0x180 | 0x182..=0x187 => self.draw(call),
             0x190..=0x192 | 0x195..=0x197 => self.button(call),
             0x150 => self.move_window(call),
             0x18d => self.draw_query(call),
@@ -819,7 +822,7 @@ impl MessageHost {
         let count = match command {
             0x180 => 0,
             0x182 => 4,
-            0x17a | 0x184 | 0x186 => 1,
+            0x17a | 0x184 | 0x186 | 0x187 => 1,
             _ => 2,
         };
         let mut args = [0u32; 4];
@@ -858,6 +861,14 @@ impl MessageHost {
             0x183 => DrawSetter::Position([a, b]),
             0x184 => DrawSetter::Layer(a),
             0x186 => DrawSetter::Opacity(a),
+            // ASUKIMI x86 0x446ea0 -> 0x420c60; docs/games/asukimi.
+            // Values outside 0..=3 leave the current blend mode intact.
+            0x187 => {
+                if a <= 3 {
+                    target.draw.as_mut().expect("checked above").words[1] = a;
+                }
+                return Ok(());
+            }
             _ => DrawSetter::Origin([a, b]),
         };
         target.draw.as_mut().expect("checked above").set(setter);
@@ -1012,7 +1023,8 @@ impl MessageHost {
     /// glyph size and spacing 0; colours 0xffffff, +144 delay 30, +148 shown, +152 layer 1,
     /// ruby size 12. The logical size (+552/+556) repeats the configured screen info +8/+12.
     /// The face is copied into +44 and selected on the
-    /// font object (0x140059b90); only the default empty face is modeled. The capacity
+    /// font object (0x140059b90); explicit faces are enabled only for the inspected
+    /// 2007 constructor (0x444410 -> 0x4356a0 -> 0x4338a0). The capacity
     /// (+324) sizes the glyph texture in 0x14005a6a0: 0 and 196 (0x215d's value) both give
     /// a 1024x2048 texture; other capacities are rejected because textures are not modeled.
     /// Replacing a text object a window caches (+2528) would leave that window stale.
@@ -1027,19 +1039,22 @@ impl MessageHost {
             ));
         }
         let index = index as usize;
-        if index >= TEXT_OBJECTS {
+        if index
+            >= if self.legacy_text_creation {
+                8
+            } else {
+                TEXT_OBJECTS
+            }
+        {
             return Err(error(
                 pc,
                 0x2100,
-                "text object index outside 0..11 sets an unmodeled flag",
+                "text object index outside the selected table sets an unmodeled flag",
             ));
         }
-        if !{
-            let reference = call.argument(8, text_argument_names(call.command)[1])?;
-            call.vm.resolve_string(reference)?
-        }
-        .is_empty()
-        {
+        let reference = call.argument(8, text_argument_names(call.command)[1])?;
+        let requested_face = call.vm.resolve_string(reference)?;
+        if !requested_face.is_empty() && !self.legacy_text_creation {
             return Err(error(pc, 0x2100, "font face selection is not modeled"));
         }
         let glyph_capacity = call.argument(12, text_argument_names(call.command)[2])?;
@@ -1062,9 +1077,17 @@ impl MessageHost {
             .state_mut()
             .set_system_integer(0, 1)
             .expect("slot 0 exists");
-        let face = self.font_slot(index);
+        let mut face = self.font_slot(index);
+        if self.legacy_text_creation {
+            face = if requested_face.is_empty() {
+                self.default_face()
+            } else {
+                Arc::from(requested_face.as_slice())
+            };
+            self.font_faces[index] = Some(face.clone());
+        }
         self.texts[index] = Some(TextObject {
-            font_face: Vec::new(),
+            font_face: requested_face,
             face,
             bold: self.font_bold[index],
             revision_alpha: self.output_settings.revision_alpha,
@@ -2243,7 +2266,7 @@ impl MessageHost {
 }
 
 fn is_window_command(command: u16) -> bool {
-    matches!(command, 0xec | 0x140..=0x151 | 0x155 | 0x15a | 0x15b | 0x15d | 0x15e | 0x171 | 0x178..=0x17c | 0x17f | 0x180 | 0x182..=0x186 | 0x18d | 0x190..=0x192 | 0x195..=0x197 | 0x1cf..=0x1d1)
+    matches!(command, 0xec | 0x140..=0x151 | 0x155 | 0x15a | 0x15b | 0x15d | 0x15e | 0x171 | 0x178..=0x17c | 0x17f | 0x180 | 0x182..=0x187 | 0x18d | 0x190..=0x192 | 0x195..=0x197 | 0x1cf..=0x1d1)
 }
 fn window_argument_names(command: u16) -> &'static [&'static str] {
     match command {
@@ -2294,6 +2317,7 @@ fn window_argument_names(command: u16) -> &'static [&'static str] {
         0x183 | 0x185 => &["window slot", "child slot", "x", "y"],
         0x184 => &["window slot", "child slot", "layer"],
         0x186 => &["window slot", "child slot", "opacity"],
+        0x187 => &["window slot", "child slot", "blend mode"],
         0x190 => &[
             "window slot",
             "button index",

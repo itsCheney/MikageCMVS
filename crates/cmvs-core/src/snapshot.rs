@@ -17,18 +17,32 @@ pub(crate) use visual::RESTORE_PIXELS;
 pub use visual::{SavedImage, SavedScene, SavedWindow, VisualPreview, VisualSnapshot};
 pub use vm_state::VmSnapshot;
 
-/// Supported snapshot text layouts. Special image/effect records remain bounded by
-/// their own decoders; a text layout does not grant support for unknown records.
+/// Supported snapshot text and scene layouts. Special image/effect records remain
+/// bounded by their own decoders; a layout does not grant support for unknown records.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SnapshotLayout {
+    /// Inspected 20071117: text/window/scene v1, draw v3 and a single BGM name.
+    TextV1SceneV1,
     TextV2,
     TextV3,
+    /// Text v3, scene v4 with 1024 child slots (REALIVE and verified later builds).
+    TextV3SceneV4,
 }
 impl SnapshotLayout {
     pub(crate) fn text_version(self) -> u16 {
         match self {
+            Self::TextV1SceneV1 => 1,
             Self::TextV2 => 2,
-            Self::TextV3 => 3,
+            Self::TextV3 | Self::TextV3SceneV4 => 3,
+        }
+    }
+    pub(crate) fn child_slots(self) -> u16 {
+        if self == Self::TextV1SceneV1 {
+            256
+        } else if self == Self::TextV3SceneV4 {
+            1024
+        } else {
+            768
         }
     }
 }
@@ -66,7 +80,9 @@ pub enum Framing {
 /// Framing of every tag emitted by the writer; the loader 0x140069fd0 reads the same layout.
 pub fn framing(tag: u16) -> Option<Framing> {
     Some(match tag {
-        0x100..=0x10b | 0x112..=0x115 | 0x200..=0x203 | 0x240 | 0x241 | 0x248 => Framing::Short,
+        0x100..=0x10b | 0x112..=0x115 | 0x200..=0x203 | 0x240 | 0x241 | 0x248 | 0x300 => {
+            Framing::Short
+        }
         0x242
         | 0x243
         | 0x280..=0x283

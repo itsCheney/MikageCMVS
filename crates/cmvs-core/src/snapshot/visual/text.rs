@@ -31,15 +31,20 @@ pub(crate) fn decode_with_layout(
     if font_face.len() > 31 {
         return Err(FormatError("snapshot font face exceeds native capacity"));
     }
-    let logical_size = r.words::<2>()?.map(|v| v as i32);
-    if logical_size.iter().any(|&v| v <= 0) {
+    // V1 reconstructs at the current device size; no size is stored in its record.
+    let logical_size = if layout == SnapshotLayout::TextV1SceneV1 {
+        [0; 2]
+    } else {
+        r.words::<2>()?.map(|v| v as i32)
+    };
+    if layout != SnapshotLayout::TextV1SceneV1 && logical_size.iter().any(|&v| v <= 0) {
         return Err(FormatError("snapshot text logical size must be positive"));
     }
     let a = r.take(156)?;
     let b = r.take(148)?;
     let c = match layout {
-        SnapshotLayout::TextV2 => &[0; 208],
-        SnapshotLayout::TextV3 => r.take(208)?,
+        SnapshotLayout::TextV1SceneV1 | SnapshotLayout::TextV2 => &[0; 208],
+        SnapshotLayout::TextV3 | SnapshotLayout::TextV3SceneV4 => r.take(208)?,
     };
     let word = |block: &[u8], at: usize| u32::from_le_bytes(block[at..at + 4].try_into().unwrap());
     // A begins at native +8, B at +176, C at +328.
@@ -165,9 +170,9 @@ pub(crate) fn encode_with_layout(
     text: &TextObject,
     layout: SnapshotLayout,
 ) -> Result<Vec<u8>, FormatError> {
-    if layout == SnapshotLayout::TextV2 && text.line_break.is_some() {
+    if layout.text_version() < 3 && text.line_break.is_some() {
         return Err(FormatError(
-            "snapshot text v2 has no extended line-break rules",
+            "snapshot text v1/v2 cannot store line-break rules",
         ));
     }
     if text.font_face.len() > 31 || text.font_face.contains(&0) {
@@ -234,12 +239,14 @@ pub(crate) fn encode_with_layout(
     out.extend(text.glyph_capacity.to_le_bytes());
     out.extend(&text.font_face);
     out.push(0);
-    for size in text.logical_size {
-        out.extend((size as u32).to_le_bytes());
+    if layout != SnapshotLayout::TextV1SceneV1 {
+        for size in text.logical_size {
+            out.extend((size as u32).to_le_bytes());
+        }
     }
     out.extend(a);
     out.extend(b);
-    if layout == SnapshotLayout::TextV3 {
+    if layout.text_version() == 3 {
         out.extend(c);
     }
     out.extend((text.glyphs.len() as u16).to_le_bytes());
@@ -307,7 +314,7 @@ mod tests {
         assert_eq!(glyph.outline, [2, 0xdeadbeef]);
         assert!(glyph.shown && !glyph.active && glyph.opacity == 255);
         assert_eq!(encode(&text).unwrap(), bytes);
-        // The older writer omits the entire 208-byte C block, without changing
+        // The text v2 writer omits the entire 208-byte C block, without changing
         // the 44-byte glyph descriptors. A profile must choose the matching codec.
         let mut v2 = bytes.clone();
         v2[..2].copy_from_slice(&2u16.to_le_bytes());

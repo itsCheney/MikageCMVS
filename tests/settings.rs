@@ -7,6 +7,43 @@ mod bytecode;
 use bytecode::{command, pending, script};
 
 #[test]
+fn asukimi_canvas_uses_the_old_window_size_schema_only_for_its_binary() {
+    use cmvs_rs::{profile::Registry, settings::Configuration};
+    let profile = Registry::builtin().profile("cmvs-20071117").unwrap();
+    for (ini, expected) in [
+        ("", [800, 600]),
+        ("[CMVS_SYSTEM_MAIN]\nWINDOW_SIZE=0\n", [640, 480]),
+        ("[CMVS_SYSTEM_MAIN]\nWINDOW_SIZE=2\n", [1024, 768]),
+        (
+            "[CMVS_SYSTEM_MAIN]\nWINDOW_SIZE=9\n[RESOLVING_POWER_INFO]\nWINDOW_WIDTH=960\nWINDOW_HEIGHT=720\n",
+            [960, 720],
+        ),
+    ] {
+        let config = Configuration::new(ini.as_bytes().to_vec()).unwrap();
+        assert_eq!(
+            config.screen_size_for_profile(profile).unwrap().pixels(),
+            expected
+        );
+        assert_eq!(config.screen_size().unwrap().pixels(), [1280, 720]);
+    }
+    let invalid = Configuration::new(
+        b"[CMVS_SYSTEM_MAIN]\nWINDOW_SIZE=9\n[RESOLVING_POWER_INFO]\nWINDOW_WIDTH=-1\n".to_vec(),
+    )
+    .unwrap();
+    assert!(invalid.screen_size_for_profile(profile).is_err());
+    let mut changed = profile.clone();
+    changed.binaries[0].sha256 = [0; 32];
+    assert_eq!(
+        Configuration::new(vec![])
+            .unwrap()
+            .screen_size_for_profile(&changed)
+            .unwrap()
+            .pixels(),
+        [1280, 720]
+    );
+}
+
+#[test]
 fn logical_canvas_uses_base_and_rejects_invalid_allocation_sizes() {
     use cmvs_rs::settings::Configuration;
     assert_eq!(
@@ -19,6 +56,17 @@ fn logical_canvas_uses_base_and_rejects_invalid_allocation_sizes() {
     );
     let config = Configuration::new(b"[RESOLVING_POWER_INFO]\nWINDOW_WIDTH=800\nWINDOW_HEIGHT=600\n[WINDOW_RESOLVING]\nBASE=1024, 768\nMODE01=640,480\n".to_vec()).unwrap();
     assert_eq!(config.screen_size().unwrap().pixels(), [1024, 768]);
+    let hd = Configuration::new(
+        b"[WINDOW_RESOLVING]\nBASE=1920,1080\nSELECT=1\nMODE01=1024,576\n".to_vec(),
+    )
+    .unwrap();
+    let profile = cmvs_rs::profile::Registry::builtin()
+        .profile("cmvs-20221105")
+        .unwrap();
+    assert_eq!(
+        hd.screen_size_for_profile(profile).unwrap().pixels(),
+        [1920, 1080]
+    );
     for value in [
         "0,768",
         "-1,768",
@@ -829,84 +877,86 @@ fn substring_counts_complete_pairs_and_does_not_clear_an_empty_copy() {
 
 #[test]
 fn realive_alpha_revision_round_trips_and_preserves_pending_errors() {
-    use cmvs_rs::{
-        dispatch::{self, Flow, Hosts},
-        profile::Registry,
-    };
-    let profile = Registry::builtin().profile("cmvs-20190305").unwrap();
-    let semantics = profile.semantics(0x2f9);
-    assert!(
-        SettingsHost::from_ini(b"[MESSAGE_INFO]\nTEXT_REVISION_ALPHA=-1\n")
-            .text_output()
-            .revision_alpha
-    );
-    let mut code = vec![];
-    for raw in [u32::MAX, 0, 2] {
-        command(&mut code, 0x22f9, &[1, raw]);
-        command(&mut code, 0x22f9, &[0, 0]);
-    }
-    command(&mut code, 0x22f9, &[1]);
-    let script = script(&code);
-    let mut vm = Machine::new(&script).unwrap();
-    let mut settings = SettingsHost::default();
-    for expected in [1, 0, 1] {
-        vm.state_mut().set_system_integer(0, 77).unwrap();
-        pending(&mut vm);
-        let before = (vm.pc(), vm.stack().len_bytes(), vm.pending_system());
-        assert_eq!(
-            dispatch::run(semantics, &mut vm, &mut Hosts::default()).unwrap(),
-            Some(Flow::Unavailable)
+    for id in ["cmvs-20190305", "cmvs-20190405"] {
+        use cmvs_rs::{
+            dispatch::{self, Flow, Hosts},
+            profile::Registry,
+        };
+        let profile = Registry::builtin().profile(id).unwrap();
+        let semantics = profile.semantics(0x2f9);
+        assert!(
+            SettingsHost::from_ini(b"[MESSAGE_INFO]\nTEXT_REVISION_ALPHA=-1\n")
+                .text_output()
+                .revision_alpha
         );
-        assert_eq!(
-            (vm.pc(), vm.stack().len_bytes(), vm.pending_system()),
-            before
-        );
-        for result in [77, expected] {
-            assert_eq!(
-                dispatch::run(
-                    semantics,
-                    &mut vm,
-                    &mut Hosts {
-                        settings: Some(&mut settings),
-                        ..Default::default()
-                    }
-                )
-                .unwrap(),
-                Some(Flow::Done)
-            );
-            assert_eq!(vm.state().system_integer(0), Some(result));
-            assert_eq!(vm.stack().len_bytes(), 0);
-            if result == 77 {
-                pending(&mut vm);
-            }
+        let mut code = vec![];
+        for raw in [u32::MAX, 0, 2] {
+            command(&mut code, 0x22f9, &[1, raw]);
+            command(&mut code, 0x22f9, &[0, 0]);
         }
-        assert_eq!(u32::from(settings.text_output().revision_alpha), expected);
-    }
-    pending(&mut vm);
-    let before = (
-        vm.pc(),
-        vm.stack().len_bytes(),
-        vm.pending_system(),
-        settings.clone(),
-    );
-    assert!(
-        dispatch::run(
-            semantics,
-            &mut vm,
-            &mut Hosts {
-                settings: Some(&mut settings),
-                ..Default::default()
+        command(&mut code, 0x22f9, &[1]);
+        let script = script(&code);
+        let mut vm = Machine::new(&script).unwrap();
+        let mut settings = SettingsHost::default();
+        for expected in [1, 0, 1] {
+            vm.state_mut().set_system_integer(0, 77).unwrap();
+            pending(&mut vm);
+            let before = (vm.pc(), vm.stack().len_bytes(), vm.pending_system());
+            assert_eq!(
+                dispatch::run(semantics, &mut vm, &mut Hosts::default()).unwrap(),
+                Some(Flow::Unavailable)
+            );
+            assert_eq!(
+                (vm.pc(), vm.stack().len_bytes(), vm.pending_system()),
+                before
+            );
+            for result in [77, expected] {
+                assert_eq!(
+                    dispatch::run(
+                        semantics,
+                        &mut vm,
+                        &mut Hosts {
+                            settings: Some(&mut settings),
+                            ..Default::default()
+                        }
+                    )
+                    .unwrap(),
+                    Some(Flow::Done)
+                );
+                assert_eq!(vm.state().system_integer(0), Some(result));
+                assert_eq!(vm.stack().len_bytes(), 0);
+                if result == 77 {
+                    pending(&mut vm);
+                }
             }
-        )
-        .is_err()
-    );
-    assert_eq!(
-        (
+            assert_eq!(u32::from(settings.text_output().revision_alpha), expected);
+        }
+        pending(&mut vm);
+        let before = (
             vm.pc(),
             vm.stack().len_bytes(),
             vm.pending_system(),
-            settings
-        ),
-        before
-    );
+            settings.clone(),
+        );
+        assert!(
+            dispatch::run(
+                semantics,
+                &mut vm,
+                &mut Hosts {
+                    settings: Some(&mut settings),
+                    ..Default::default()
+                }
+            )
+            .is_err()
+        );
+        assert_eq!(
+            (
+                vm.pc(),
+                vm.stack().len_bytes(),
+                vm.pending_system(),
+                settings
+            ),
+            before
+        );
+    }
 }

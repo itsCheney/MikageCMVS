@@ -2,6 +2,7 @@
 //! 0x2080 and 0x22b2, slot writes 0x22b6 (0x140080b20), loads 0x22b5 (0x140081960 then
 //! 0x140069fd0), thumbnails 0x22b8 (0x14006b4a0) and the slot queries 0x22b7 / 0x22bd.
 use super::{Startup, SystemOutput};
+use crate::filesystem as fs;
 use crate::{
     audio::SavedAudio,
     dispatch::RuntimeCall,
@@ -17,7 +18,7 @@ use crate::{
         SnapshotLayout,
     },
 };
-use std::{collections::BTreeMap, error::Error, fs, io::Write, path::Path};
+use std::{collections::BTreeMap, error::Error, io::Write, path::Path};
 
 /// Local wall-clock fields for save labels: year, month, day, hour, minute, second.
 pub type SaveTime = [u16; 6];
@@ -123,20 +124,77 @@ fn decode_bmp(bytes: &[u8]) -> Result<RgbaImage, &'static str> {
 }
 
 /// Command inheritance does not establish the wire format of gameplay snapshots.
-/// The independently inspected 20110525/20130131/20140217/20150405 subsets use text v2, and 20171114 uses v3
-/// (docs/games/aoitori/vm-semantics.md). Effect configurations have an independent
+/// The independently inspected 20110525/20120309/20130131/20140217/20150405 subsets use text v2;
+/// 20171114 uses v3, and 20190305/20190405/20211006/20221105 use text v3 with scene v4
+/// (docs/games/{aoitori,realive,seishunf,kunado,hapymaher_re}). Effect configurations have an independent
 /// build binding; unknown image, collision-mesh and effect records remain rejected.
 pub fn snapshot_layout_supported(profile: &crate::profile::EngineProfile) -> bool {
     snapshot_layout(profile).is_some()
 }
 
+fn inspected_20120309(profile: &crate::profile::EngineProfile) -> bool {
+    profile.id == "cmvs-20120309"
+        && profile
+            .binary(
+                &crate::digest::parse_hex(
+                    "f93d90d45dad95588f91425fa5d4fe20be0d97e1978ccb4ae0e83ca6e09aa15e",
+                )
+                .expect("static SHA-256"),
+            )
+            .is_some()
+}
+
+fn inspected_20221105(profile: &crate::profile::EngineProfile) -> bool {
+    profile.id == "cmvs-20221105"
+        && profile
+            .binary(
+                &crate::digest::parse_hex(
+                    "dfbabd2abac5055d3ab2144a983b6c441b87b294d19607e9a4829e2ea954e86c",
+                )
+                .expect("static SHA-256"),
+            )
+            .is_some()
+}
+
 fn snapshot_layout(profile: &crate::profile::EngineProfile) -> Option<SnapshotLayout> {
-    if matches!(
+    if profile.is_inspected_20071117() {
+        return Some(SnapshotLayout::TextV1SceneV1);
+    }
+    if (matches!(
         profile.id.as_str(),
         "cmvs-20110525" | "cmvs-20130131" | "cmvs-20140217" | "cmvs-20150405"
-    ) && profile.base.as_deref() == Some("cmvs-20160201")
+    ) || inspected_20120309(profile))
+        && profile.base.as_deref() == Some("cmvs-20160201")
     {
         Some(SnapshotLayout::TextV2)
+    } else if profile.base.as_deref() == Some("cmvs-20160201")
+        && [
+            (
+                "cmvs-20190305",
+                "02b71aac3d3d1ced1d0312b6c37748cf12df9cffd9585fb07787e6ca43199f00",
+            ),
+            (
+                "cmvs-20190405",
+                "c1742b5873e6d03f5cc7bc6f5b3b23655ec67e7cddf307deefa75349caed33be",
+            ),
+            (
+                "cmvs-20211006",
+                "58e993a82e741ea73d3d1b5d89363dcaf435e72e6d505324e1de0c0ba5486631",
+            ),
+            (
+                "cmvs-20221105",
+                "dfbabd2abac5055d3ab2144a983b6c441b87b294d19607e9a4829e2ea954e86c",
+            ),
+        ]
+        .iter()
+        .any(|(id, hash)| {
+            profile.id == *id
+                && profile
+                    .binary(&crate::digest::parse_hex(hash).expect("static SHA-256"))
+                    .is_some()
+        })
+    {
+        Some(SnapshotLayout::TextV3SceneV4)
     } else if profile.base.is_none()
         || (profile.id == "cmvs-20171114" && profile.base.as_deref() == Some("cmvs-20160201"))
         // Mikage: アオイトリ's 2017-11-29 update, read like the 2017-11-14 build.
@@ -149,24 +207,44 @@ fn snapshot_layout(profile: &crate::profile::EngineProfile) -> Option<SnapshotLa
 }
 
 fn effect_layout_supported(profile: &crate::profile::EngineProfile) -> bool {
-    matches!(
+    (matches!(
         profile.id.as_str(),
         "cmvs-20110525" | "cmvs-20171114" | "cmvs-20171129"
-    ) && profile.base.as_deref() == Some("cmvs-20160201")
+    ) || inspected_20120309(profile)
+        || inspected_20221105(profile)
+        || (profile.id == "cmvs-20211006"
+            && profile
+                .binary(
+                    &crate::digest::parse_hex(
+                        "58e993a82e741ea73d3d1b5d89363dcaf435e72e6d505324e1de0c0ba5486631",
+                    )
+                    .expect("static SHA-256"),
+                )
+                .is_some()))
+        && profile.base.as_deref() == Some("cmvs-20160201")
 }
 
 fn effect_record_supported(profile: &crate::profile::EngineProfile, body: &[u8]) -> bool {
+    if inspected_20221105(profile)
+        && profile.base.as_deref() == Some("cmvs-20160201")
+        && body == [1, 0, 8, 0]
+    {
+        // The native type-8 writer emits only this header; its reader discards it.
+        return true;
+    }
     effect_layout_supported(profile)
-        // MIRANOSU's type-5 writer/reader are independently inspected. Other
+        // These builds' type-5 writer/readers are independently inspected. Other
         // configurations still need their own runtime and snapshot evidence.
-        && (profile.id != "cmvs-20110525" || body.get(..4) == Some(&[1, 0, 5, 0]))
+        && (!matches!(profile.id.as_str(), "cmvs-20110525" | "cmvs-20120309" | "cmvs-20211006" | "cmvs-20221105")
+            || body.get(..4) == Some(&[1, 0, 5, 0]))
 }
 
-/// 20110525 writer 0x1400332e0, 20130131 0x1400330b0 and 20140217 0x1400375d0 visit 512 children.
-/// Button-list records are absent or not enabled for these older layouts.
-fn validate_20130131_records<'a>(
+/// Writers 20110525 0x1400332e0, 20120309 0x140033e60, 20130131 0x1400330b0
+/// and 20140217 0x1400375d0 visit 512 children.
+/// Button-list records are absent or not enabled for these four builds.
+fn validate_512_child_slots_without_button_lists<'a>(
     scenes: impl Iterator<Item = &'a SavedScene>,
-    has_lists: bool,
+    has_button_lists: bool,
 ) -> Result<(), Box<dyn Error>> {
     fn scene_supported(scene: &SavedScene) -> bool {
         scene
@@ -174,7 +252,7 @@ fn validate_20130131_records<'a>(
             .iter()
             .all(|(&slot, child)| slot < 512 && scene_supported(child))
     }
-    if has_lists {
+    if has_button_lists {
         return Err("button-list snapshot records are not supported for this build".into());
     }
     if !scenes.into_iter().all(scene_supported) {
@@ -184,12 +262,37 @@ fn validate_20130131_records<'a>(
 }
 
 impl Startup<'_> {
-    fn validate_build_snapshot(&self, snapshot: &EngineSnapshot) -> Result<(), Box<dyn Error>> {
+    pub(super) fn system_save_identifier(&self) -> Option<u32> {
+        // 0x40bdf0 zeroes the CSS1 header and never writes offset 68. This is a
+        // format constant for the inspected build, not a recovered game identifier.
+        if snapshot_layout(self.gate.selection().profile) == Some(SnapshotLayout::TextV1SceneV1) {
+            Some(0)
+        } else {
+            self.bootstrap.settings().get(&0x201d).copied()
+        }
+    }
+    fn validate_build_snapshot(
+        &self,
+        snapshot: &EngineSnapshot,
+        layout: SnapshotLayout,
+    ) -> Result<(), Box<dyn Error>> {
+        if layout == SnapshotLayout::TextV1SceneV1 {
+            if snapshot.effects[2].is_some() {
+                return Err("old mask snapshot records are not implemented".into());
+            }
+            if let Some(&(tag, _)) = snapshot
+                .raw_objects
+                .keys()
+                .find(|&&(tag, _)| matches!(tag, 0x800 | 0x8c8))
+            {
+                return Err(format!("old snapshot record {tag:#x} is not implemented").into());
+            }
+        }
         if matches!(
             self.gate.selection().profile.id.as_str(),
-            "cmvs-20110525" | "cmvs-20130131" | "cmvs-20140217"
+            "cmvs-20110525" | "cmvs-20120309" | "cmvs-20130131" | "cmvs-20140217"
         ) {
-            validate_20130131_records(
+            validate_512_child_slots_without_button_lists(
                 snapshot
                     .objects
                     .values()
@@ -233,7 +336,7 @@ impl Startup<'_> {
         &self,
         vm: crate::machine::VmImage,
     ) -> Result<(EngineSnapshot, Vec<u8>), Box<dyn Error>> {
-        self.require_snapshot_layout()?;
+        let layout = self.require_snapshot_layout()?;
         if self.scene.has_effect_pools() && !effect_layout_supported(self.gate.selection().profile)
         {
             return Err("saving active particle effects is not implemented".into());
@@ -268,13 +371,13 @@ impl Startup<'_> {
             raw_objects.insert((0x800, slot), record);
         }
         raw_objects.insert((0x540, 0), self.history.saved());
-        for (slot, record) in self.buttons.saved_groups() {
+        for (slot, record) in self.buttons.saved_groups_with_layout(layout) {
             raw_objects.insert((0x8c0, slot), record);
         }
         for (slot, record) in self.buttons.saved_lists() {
             raw_objects.insert((0x8c8, slot), record);
         }
-        for (slot, record) in self.movies.saved_scene_players() {
+        for (slot, record) in self.movies.saved_scene_players_with_layout(layout) {
             raw_objects.insert((0x8e8, slot), record);
         }
         let (second_group, popup) = self.save_menu.saved_flags();
@@ -310,7 +413,14 @@ impl Startup<'_> {
                 self.scene.saved_mask(),
                 self.scene.saved_strip(),
             ],
-            record_6e0: self.sequence.saved()?,
+            record_6e0: if layout == SnapshotLayout::TextV1SceneV1 {
+                if self.sequence.saved()? != crate::sequence::SequenceHost::default().saved()? {
+                    return Err("sequence state has no v1 snapshot representation".into());
+                }
+                Vec::new()
+            } else {
+                self.sequence.saved()?
+            },
             cameras: [
                 self.camera.saved(0),
                 self.camera.saved(1),
@@ -322,7 +432,7 @@ impl Startup<'_> {
             sound_channels: self.audio.saved_channels(),
             sound_device: vec![1, 0, 0, 0, 0, 0],
         };
-        self.validate_build_snapshot(&snapshot)?;
+        self.validate_build_snapshot(&snapshot, layout)?;
         Ok((snapshot, vm.main_image))
     }
 
@@ -431,7 +541,7 @@ impl Startup<'_> {
             replace_file(&directory, &format!("save{BACKUP_SLOT:03}.dat"), &previous)?;
         }
         // 0x1400179e0: the system save is written with every slot.
-        let id = self.bootstrap.settings().get(&0x201d).copied();
+        let id = self.system_save_identifier();
         if let Some(output) = &mut self.system_output {
             self.system_host
                 .write_now(self.machine.state(), output, &mut self.random, id)?;
@@ -546,8 +656,15 @@ impl Startup<'_> {
             .ok_or("save slot to load does not exist")?;
         let save = Csv2Save::decode(&bytes)?;
         let snapshot = EngineSnapshot::decode_with_layout(&save.snapshot, layout)?;
-        self.validate_build_snapshot(&snapshot)?;
-        self.restore_snapshot(slot, &save, &bytes[..HEADER_SIZE], &snapshot, backend)
+        self.validate_build_snapshot(&snapshot, layout)?;
+        self.restore_snapshot(
+            slot,
+            &save,
+            &bytes[..HEADER_SIZE],
+            &snapshot,
+            layout,
+            backend,
+        )
     }
 
     /// Loader 0x140081960 and reader 0x140069fd0 over the Rust hosts. Everything fallible
@@ -559,6 +676,7 @@ impl Startup<'_> {
         save: &Csv2Save,
         header: &[u8],
         snapshot: &EngineSnapshot,
+        layout: SnapshotLayout,
         backend: &mut impl PlatformBackend,
     ) -> Result<(), Box<dyn Error>> {
         if snapshot.word_11144 != 1 {
@@ -667,13 +785,14 @@ impl Startup<'_> {
             .filter(|((tag, _), _)| *tag == 0x8e8)
             .map(|(&(_, slot), body)| (slot, body.as_slice()))
             .collect();
-        let players = self.movies.load_scene_players(
+        let players = self.movies.load_scene_players_with_layout(
             &movie_records,
             &mut objects,
             &mut self.scene_movies.with_paths(
                 self.bootstrap.paths(),
                 crate::resources::ResourceKind::SceneMovie,
             ),
+            layout,
         )?;
         let records = |tag: u16| -> Vec<(u16, &[u8])> {
             snapshot
@@ -684,17 +803,30 @@ impl Startup<'_> {
                 .collect()
         };
         let mut buttons = self.buttons.clone();
-        buttons.restore(&records(0x8c0), &records(0x8c8))?;
-        let texts: [Option<_>; TEXT_OBJECTS] = snapshot.texts.clone();
+        buttons.restore_with_layout(&records(0x8c0), &records(0x8c8), layout)?;
+        let mut texts: [Option<_>; TEXT_OBJECTS] = snapshot.texts.clone();
+        if layout == SnapshotLayout::TextV1SceneV1 {
+            for text in texts.iter_mut().flatten() {
+                text.logical_size = self.messages.screen_size().map(|v| v as i32);
+            }
+        }
         let mut history = self.history.clone();
         history.restore(&snapshot.raw_objects[&(0x540, 0)])?;
         let mut sequence = self.sequence.clone();
-        sequence.restore(&snapshot.record_6e0)?;
+        if layout == SnapshotLayout::TextV1SceneV1 {
+            sequence = crate::sequence::SequenceHost::default();
+        } else {
+            sequence.restore(&snapshot.record_6e0)?;
+        }
         let mut camera_host = self.camera.clone();
         camera_host.restore(0, &snapshot.cameras[0])?;
         camera_host.restore(1, &snapshot.cameras[1])?;
         camera_host.restore_view(0, &snapshot.cameras[2])?;
         camera_host.restore_view(1, &snapshot.cameras[3])?;
+        // Auto-resume can load before any playback command has configured the backend.
+        self.audio_backend.configure_paths(self.bootstrap.paths())?;
+        self.audio_backend
+            .configure_archive_parameters(self.bootstrap.archive_parameters())?;
         self.platform.restored_title(&snapshot.scene_title)?;
         self.machine.install_restore(vm);
         // Commit the hosts.
@@ -927,17 +1059,30 @@ mod layout_tests {
     fn snapshot_layout_requires_an_independently_inspected_build() {
         let registry = crate::profile::Registry::builtin();
         for (id, layout) in [
+            ("cmvs-20071117", SnapshotLayout::TextV1SceneV1),
             ("cmvs-20110525", SnapshotLayout::TextV2),
+            ("cmvs-20120309", SnapshotLayout::TextV2),
             ("cmvs-20130131", SnapshotLayout::TextV2),
             ("cmvs-20140217", SnapshotLayout::TextV2),
             ("cmvs-20150405", SnapshotLayout::TextV2),
             ("cmvs-20171114", SnapshotLayout::TextV3),
+            ("cmvs-20190305", SnapshotLayout::TextV3SceneV4),
+            ("cmvs-20190405", SnapshotLayout::TextV3SceneV4),
+            ("cmvs-20211006", SnapshotLayout::TextV3SceneV4),
+            ("cmvs-20221105", SnapshotLayout::TextV3SceneV4),
             ("cmvs-20160201", SnapshotLayout::TextV3),
         ] {
             assert_eq!(snapshot_layout(registry.profile(id).unwrap()), Some(layout));
             assert_eq!(
                 effect_layout_supported(registry.profile(id).unwrap()),
-                matches!(id, "cmvs-20110525" | "cmvs-20171114")
+                matches!(
+                    id,
+                    "cmvs-20110525"
+                        | "cmvs-20120309"
+                        | "cmvs-20171114"
+                        | "cmvs-20211006"
+                        | "cmvs-20221105"
+                )
             );
         }
         let mut profile = registry.profile("cmvs-20171114").unwrap().clone();
@@ -951,29 +1096,56 @@ mod layout_tests {
     }
 
     #[test]
-    fn older_effect_layout_only_accepts_the_inspected_type_five() {
+    fn restricted_effect_layout_only_accepts_the_inspected_type_five() {
         let registry = crate::profile::Registry::builtin();
-        let profile = registry.profile("cmvs-20110525").unwrap();
-        for kind in [2, 5, 6, 8] {
-            assert_eq!(
-                effect_record_supported(profile, &[1, 0, kind, 0]),
-                kind == 5
-            );
+        for id in [
+            "cmvs-20110525",
+            "cmvs-20120309",
+            "cmvs-20211006",
+            "cmvs-20221105",
+        ] {
+            let profile = registry.profile(id).unwrap();
+            for kind in [2, 5, 6, 8] {
+                assert_eq!(
+                    effect_record_supported(profile, &[1, 0, kind, 0]),
+                    kind == 5 || (id == "cmvs-20221105" && kind == 8)
+                );
+            }
+            assert!(!effect_record_supported(profile, &[1, 0]));
+            assert!(!effect_record_supported(profile, &[2, 0, 5, 0]));
+            assert!(!effect_record_supported(profile, &[1, 0, 8, 0, 0]));
         }
-        assert!(!effect_record_supported(profile, &[1, 0]));
-        assert!(!effect_record_supported(profile, &[2, 0, 5, 0]));
+        for id in [
+            "cmvs-20071117",
+            "cmvs-20120309",
+            "cmvs-20211006",
+            "cmvs-20221105",
+        ] {
+            let mut profile = registry.profile(id).unwrap().clone();
+            for binary in &mut profile.binaries {
+                binary.sha256 = [0; 32];
+            }
+            assert_eq!(snapshot_layout(&profile), None);
+            assert!(!effect_record_supported(&profile, &[1, 0, 5, 0]));
+        }
     }
 
     #[test]
-    fn older_snapshot_rejects_lists_and_nested_children_beyond_its_table() {
+    fn snapshot_with_512_child_slots_rejects_button_lists_and_out_of_range_nested_children() {
         let leaf = SavedScene::from_object(&SceneObject::default()).unwrap();
         let mut parent = leaf.clone();
         parent.children.insert(511, leaf.clone());
-        assert!(validate_20130131_records(std::iter::once(&parent), false).is_ok());
-        assert!(validate_20130131_records(std::iter::once(&parent), true).is_err());
+        assert!(
+            validate_512_child_slots_without_button_lists(std::iter::once(&parent), false).is_ok()
+        );
+        assert!(
+            validate_512_child_slots_without_button_lists(std::iter::once(&parent), true).is_err()
+        );
         let mut nested = leaf.clone();
         nested.children.insert(512, leaf);
         parent.children.insert(0, nested);
-        assert!(validate_20130131_records(std::iter::once(&parent), false).is_err());
+        assert!(
+            validate_512_child_slots_without_button_lists(std::iter::once(&parent), false).is_err()
+        );
     }
 }

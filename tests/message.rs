@@ -801,6 +801,30 @@ fn window_draw_commands_reuse_scene_draw_fields() {
 }
 
 #[test]
+fn window_blend_mode_changes_parent_and_child_and_ignores_invalid_values() {
+    let mut code = vec![];
+    create(&mut code, 0, 0, [0, 0, 10, 10]);
+    call(&mut code, 0x2180, &[u32::MAX, 0]);
+    call(&mut code, 0x2178, &[5, 0]);
+    call(&mut code, 0x2180, &[5, 0]);
+    for mode in [0, 1, 2, 3, 4, u32::MAX] {
+        call(&mut code, 0x2187, &[mode, u32::MAX, 0]);
+        call(&mut code, 0x2187, &[mode, 5, 0]);
+    }
+    let script = script(&code);
+    let mut vm = Machine::new(&script).unwrap();
+    let mut messages = MessageHost::default();
+    run(&mut vm, &mut messages, 4);
+    for mode in [0, 1, 2, 3, 3, 3] {
+        run(&mut vm, &mut messages, 2);
+        let object = &messages.window(0).unwrap().object;
+        assert_eq!(object.draw.as_ref().unwrap().words[1], mode);
+        assert_eq!(object.children[&5].draw.as_ref().unwrap().words[1], mode);
+        assert_eq!(vm.stack().len_bytes(), 0);
+    }
+}
+
+#[test]
 fn window_draw_commands_need_a_target_and_its_draw_state() {
     let mut cases = vec![];
     for (command, words) in [
@@ -809,6 +833,7 @@ fn window_draw_commands_need_a_target_and_its_draw_state() {
         (0x2180, vec![768, 0]),
         (0x2180, vec![u32::MAX, 1]),
         (0x2182, vec![0, 0, u32::MAX, 0]),
+        (0x2187, vec![2, u32::MAX, 0]),
     ] {
         let mut code = vec![];
         create(&mut code, 0, 0, [0, 0, 10, 10]);
@@ -1034,6 +1059,51 @@ fn standalone_text_creation_uses_constructor_values_and_overwrites_in_place() {
     assert_eq!(messages.text(3), Some(&recreated));
     assert!((0..MESSAGE_WINDOWS).all(|slot| messages.window(slot).is_none()));
     assert_eq!(vm.stack().len_bytes(), 0);
+}
+
+#[test]
+fn legacy_text_creation_reselects_named_and_default_faces_only_for_the_inspected_build() {
+    let profile = cmvs_rs::profile::Registry::builtin()
+        .profile("cmvs-20071117")
+        .unwrap();
+    let mut code = vec![];
+    call(&mut code, 0x2100, &[196, 1, 7]);
+    call(&mut code, 0x2100, &[196, 11, 7]);
+    call(&mut code, 0x2100, &[196, 0, 7]);
+    let script = script_with_text(&code, b"\0MS Gothic\0Other\0");
+    let mut vm = Machine::new(&script).unwrap();
+    let mut messages = MessageHost::for_profile(profile);
+    for face in [b"MS Gothic".as_slice(), b"Other", b""] {
+        run(&mut vm, &mut messages, 1);
+        let text = messages.text(7).unwrap();
+        assert_eq!(text.font_face, face);
+        assert_eq!(
+            text.face.as_ref(),
+            if face.is_empty() {
+                messages.default_face()
+            } else {
+                std::sync::Arc::from(face)
+            }
+            .as_ref()
+        );
+    }
+    let mut wrong_hash = profile.clone();
+    wrong_hash.binaries[0].sha256 = [0; 32];
+    let mut messages = MessageHost::for_profile(&wrong_hash);
+    let mut vm = Machine::new(&script).unwrap();
+    pending(&mut vm);
+    let before = (vm.pc(), vm.stack().len_bytes());
+    assert!(messages.shared_message(&mut vm).is_err());
+    assert_eq!((vm.pc(), vm.stack().len_bytes()), before);
+    assert!(!messages.font_present(7));
+    let mut code = vec![];
+    call(&mut code, 0x2100, &[196, 0, 8]);
+    let script = script_with_text(&code, b"\0");
+    let mut vm = Machine::new(&script).unwrap();
+    let mut messages = MessageHost::for_profile(profile);
+    pending(&mut vm);
+    assert!(messages.shared_message(&mut vm).is_err());
+    assert!(!messages.font_present(8));
 }
 
 #[test]
@@ -4163,8 +4233,15 @@ fn font_cell_step(
     vm: &mut Machine<'_>,
     messages: &mut MessageHost,
 ) -> Result<bool, Box<dyn std::error::Error>> {
+    font_cell_profile_step(vm, messages, "cmvs-20171114")
+}
+fn font_cell_profile_step(
+    vm: &mut Machine<'_>,
+    messages: &mut MessageHost,
+    profile_id: &str,
+) -> Result<bool, Box<dyn std::error::Error>> {
     let profile = cmvs_rs::profile::Registry::builtin()
-        .profile("cmvs-20171114")
+        .profile(profile_id)
         .unwrap();
     let mut input = ActionInput::default();
     let command = vm.pending_system().unwrap().1;
@@ -4203,6 +4280,57 @@ fn run_font_cells(vm: &mut Machine<'_>, messages: &mut MessageHost, count: usize
     for _ in 0..count {
         pending(vm);
         assert!(font_cell_step(vm, messages).unwrap());
+    }
+}
+
+#[test]
+fn kunado_measurement_and_all_main_output_paths_share_proportional_advances() {
+    #[derive(Debug)]
+    struct Metrics;
+    impl cmvs_rs::message::GlyphMetrics for Metrics {
+        fn ink_width(&self, _: &[u8], _: u16, _: u32) -> Result<u32, &'static str> {
+            Ok(20)
+        }
+        fn advance_width(&self, _: &[u8], _: u16, _: u32, _: bool) -> Result<u32, &'static str> {
+            Ok(10)
+        }
+    }
+    for (profile, op) in ["cmvs-20211006", "cmvs-20221105"]
+        .into_iter()
+        .flat_map(|profile| [0x210b, 0x2152, 0x2154, 0x2157, 0x2159].map(|op| (profile, op)))
+    {
+        let mut code = vec![];
+        create(&mut code, 0, 1, [0, 0, 300, 100]);
+        call(&mut code, 0x2103, &[100, 70, 5, 10, 1]);
+        call(&mut code, 0x2105, &[0, 0, 20, 1]);
+        call(&mut code, 0x23ac, &[1]);
+        call(&mut code, 0x211d, &[1, 1]);
+        match op {
+            0x210b => call(&mut code, op, &[1, 1]),
+            0x2154 => call(&mut code, op, &[1, 0]),
+            0x2159 => call(&mut code, op, &[0, 1, u32::MAX, 0]),
+            _ => call(&mut code, op, &[1, u32::MAX, 0]),
+        }
+        let program = script_with_text(&code, b"\0\x82\xa0\x82\xa0\x82\xa0\x82\xa0\x82\xa0\0");
+        let mut vm = Machine::new(&program).unwrap();
+        let mut messages = MessageHost::default();
+        messages.set_record_output(true);
+        messages.set_glyph_metrics(Box::new(Metrics));
+        for _ in 0..5 {
+            pending(&mut vm);
+            assert!(font_cell_profile_step(&mut vm, &mut messages, profile).unwrap());
+        }
+        assert_eq!(vm.state().system_integer(2), Some(1));
+        assert_eq!(vm.state().system_integer(1), Some(50));
+        pending(&mut vm);
+        assert!(font_cell_profile_step(&mut vm, &mut messages, profile).unwrap());
+        let text = messages.text(1).unwrap();
+        assert_eq!(
+            text.glyphs.iter().map(|g| g.position).collect::<Vec<_>>(),
+            [[10, 5], [20, 5], [30, 5], [40, 5], [50, 5]],
+            "{op:x}"
+        );
+        assert_eq!(text.cursor, [60, 5], "{op:x}");
     }
 }
 
@@ -4833,33 +4961,40 @@ fn font_objects_keep_their_face_glyphs_capture_it_and_the_dialog_refreshes_defau
 }
 
 #[test]
-fn realive_window_children_share_the_extended_table_for_draw_query_and_destroy() {
-    let profile = cmvs_rs::profile::Registry::builtin()
-        .profile("cmvs-20190305")
-        .unwrap();
-    let mut code = vec![];
-    create(&mut code, 7, 10, [0, 0, 1280, 54]);
-    call(&mut code, 0x2178, &[1023, 7]);
-    call(&mut code, 0x2180, &[1023, 7]);
-    call(&mut code, 0x217b, &[1023, 7]);
-    call(&mut code, 0x2179, &[1024, 7]);
-    call(&mut code, 0x2179, &[1023, 7]);
-    call(&mut code, 0x217b, &[1023, 7]);
-    call(&mut code, 0x2178, &[1024, 7]);
-    let script = script(&code);
-    let mut vm = Machine::new(&script).unwrap();
-    let mut messages = MessageHost::for_profile(profile);
-    run(&mut vm, &mut messages, 4);
-    assert_eq!(vm.state().system_integer(0), Some(1));
-    let before = messages.window(7).unwrap().object.clone();
-    assert!(before.children[&1023].draw.is_some());
-    run(&mut vm, &mut messages, 1);
-    assert_eq!(messages.window(7).unwrap().object, before);
-    run(&mut vm, &mut messages, 2);
-    assert_eq!(vm.state().system_integer(0), Some(0));
-    assert!(messages.window(7).unwrap().object.children.is_empty());
-    pending(&mut vm);
-    assert!(messages.shared_message(&mut vm).is_err());
-    assert_eq!(vm.stack().len_bytes(), 8);
-    assert_eq!(vm.pending_system().unwrap().1, 0x178);
+fn inspected_window_children_share_the_table_for_draw_query_and_destroy() {
+    for (id, limit) in [
+        ("cmvs-20071117", 256),
+        ("cmvs-20120309", 512),
+        ("cmvs-20190305", 1024),
+        ("cmvs-20190405", 1024),
+        ("cmvs-20211006", 1024),
+        ("cmvs-20221105", 1024),
+    ] {
+        let profile = cmvs_rs::profile::Registry::builtin().profile(id).unwrap();
+        let mut code = vec![];
+        create(&mut code, 7, 10, [0, 0, 1280, 54]);
+        call(&mut code, 0x2178, &[(limit - 1), 7]);
+        call(&mut code, 0x2180, &[(limit - 1), 7]);
+        call(&mut code, 0x217b, &[(limit - 1), 7]);
+        call(&mut code, 0x2179, &[limit, 7]);
+        call(&mut code, 0x2179, &[(limit - 1), 7]);
+        call(&mut code, 0x217b, &[(limit - 1), 7]);
+        call(&mut code, 0x2178, &[limit, 7]);
+        let script = script(&code);
+        let mut vm = Machine::new(&script).unwrap();
+        let mut messages = MessageHost::for_profile(profile);
+        run(&mut vm, &mut messages, 4);
+        assert_eq!(vm.state().system_integer(0), Some(1));
+        let before = messages.window(7).unwrap().object.clone();
+        assert!(before.children[&((limit - 1) as u16)].draw.is_some());
+        run(&mut vm, &mut messages, 1);
+        assert_eq!(messages.window(7).unwrap().object, before);
+        run(&mut vm, &mut messages, 2);
+        assert_eq!(vm.state().system_integer(0), Some(0));
+        assert!(messages.window(7).unwrap().object.children.is_empty());
+        pending(&mut vm);
+        assert!(messages.shared_message(&mut vm).is_err());
+        assert_eq!(vm.stack().len_bytes(), 8);
+        assert_eq!(vm.pending_system().unwrap().1, 0x178);
+    }
 }

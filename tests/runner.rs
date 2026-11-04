@@ -1910,12 +1910,210 @@ fn ps2_canvas_queries_pointer_and_v2_saves_keep_four_by_three_coordinates() {
 }
 
 #[test]
+fn asukimi_snapshot_roundtrip_uses_v1_records_and_zero_css1_identity() {
+    use cmvs_rs::{
+        save::Csv2Save,
+        snapshot::{EngineSnapshot, SnapshotLayout},
+        system_save::Css1Save,
+    };
+    let mut code = string_call(0x2160);
+    commands::command(&mut code, 0x2128, &[]);
+    commands::command(&mut code, 0x2140, &[0, 0, 0, 0, 800, 600]);
+    commands::command(&mut code, 0x2020, &[20]);
+    commands::command(&mut code, 0x2040, &[20]);
+    commands::command(&mut code, 0x2073, &[20, u32::MAX, 2f32.to_bits()]);
+    let pc = code.len();
+    commands::command(&mut code, 0x22b2, &[]);
+    commands::command(&mut code, 0x2073, &[20, u32::MAX, 9f32.to_bits()]);
+    let end = code.len();
+    commands::command(&mut code, 0x2000, &[]);
+    let root = Root::new("asukimi-v1-save", &code, b"Synthetic\0");
+    fs::rename(
+        root.0.join("data/pack/start.ps3"),
+        root.0.join("data/pack/start.ps2"),
+    )
+    .unwrap();
+    fs::write(root.0.join("save/system.dat"), auto_resume_save(0)).unwrap();
+    let game = Registry::builtin()
+        .identify_game(&root.0, Some("cmvs-20071117"))
+        .unwrap();
+    let script = load_start(&root.0, &game.files).unwrap();
+    let mut run = Startup::new(&script, &root.0, &game, 0).unwrap();
+    let user = root.0.with_extension("user");
+    run.set_user_data_directory(&user).unwrap();
+    let mut backend = RecordingBackend::default();
+    while run.machine().pc() != pc {
+        assert_eq!(run.tick(&mut backend).unwrap(), StartupEvent::Progress);
+    }
+    assert_eq!(
+        run.tick(&mut backend).unwrap(),
+        StartupEvent::SnapshotCaptured
+    );
+    assert!(run.save_slot(3).unwrap());
+    let bytes = fs::read(user.join("save003.dat")).unwrap();
+    let save = Csv2Save::decode(&bytes).unwrap();
+    let parsed =
+        EngineSnapshot::decode_with_layout(&save.snapshot, SnapshotLayout::TextV1SceneV1).unwrap();
+    assert!(parsed.record_6e0.is_empty());
+    assert_eq!(parsed.texts[0].as_ref().unwrap().logical_size, [0, 0]);
+    while run.machine().pc() != end {
+        run.tick(&mut backend).unwrap();
+    }
+    run.load_slot(3, &mut backend).unwrap();
+    assert_eq!(run.machine().pc(), pc + 2);
+    assert_eq!(run.machine().current_name(), b"start.ps2");
+    assert_eq!(
+        run.scene().object(20).unwrap().draw.as_ref().unwrap().words[12],
+        2f32.to_bits()
+    );
+    assert_eq!(run.messages().text(0).unwrap().logical_size, [800, 600]);
+    assert!(run.save_slot(4).unwrap());
+    let second = Csv2Save::decode(&fs::read(user.join("save004.dat")).unwrap()).unwrap();
+    assert_eq!(second.snapshot, save.snapshot);
+    assert_eq!(second.script_image, save.script_image);
+    assert!(user.join("save998.dat").is_file());
+    assert_eq!(
+        Css1Save::decode(&fs::read(user.join("system.dat")).unwrap())
+            .unwrap()
+            .layout()
+            .game_id,
+        0
+    );
+    drop(run);
+    fs::remove_dir_all(user).unwrap();
+}
+
+#[test]
 fn aoitori_v3_snapshot_restores_text_scene_locals_and_backup_slots() {
     snapshot_slots_roundtrip(Some("cmvs-20171114"));
 }
 
+#[test]
+fn load_before_first_audio_command_configures_resources_before_replaying_bgm() {
+    use cmvs_rs::audio::{AudioBackend, AudioRequest, VoiceDuckingSettings};
+    use std::{cell::Cell, rc::Rc};
+    struct Audio {
+        paths_ready: bool,
+        configured: bool,
+        played: Rc<Cell<bool>>,
+    }
+    impl AudioBackend for Audio {
+        fn configure_voice_ducking(
+            &mut self,
+            _: VoiceDuckingSettings,
+        ) -> Result<(), Box<dyn Error>> {
+            Ok(())
+        }
+        fn configure_paths(
+            &mut self,
+            paths: &std::collections::BTreeMap<(u16, u32), Vec<u8>>,
+        ) -> Result<(), Box<dyn Error>> {
+            assert_eq!(
+                paths.get(&(0x2013, 0)).map(Vec::as_slice),
+                Some(&b"Synthetic"[..])
+            );
+            self.paths_ready = true;
+            self.configured = false;
+            Ok(())
+        }
+        fn configure_archive_parameters(
+            &mut self,
+            _: &std::collections::BTreeMap<(u16, u32), cmvs_rs::cpz::Cpz7Parameters>,
+        ) -> Result<(), Box<dyn Error>> {
+            assert!(self.paths_ready);
+            self.configured = true;
+            Ok(())
+        }
+        fn play(&mut self, _: &AudioRequest) -> Result<bool, Box<dyn Error>> {
+            Ok(true)
+        }
+        fn stop(&mut self, _: u8) -> Result<(), Box<dyn Error>> {
+            Ok(())
+        }
+        fn stop_voice(&mut self, _: u8) -> Result<(), Box<dyn Error>> {
+            Ok(())
+        }
+        fn stop_channel15(&mut self) -> Result<(), Box<dyn Error>> {
+            Ok(())
+        }
+        fn stop_bgm(&mut self) -> Result<(), Box<dyn Error>> {
+            Ok(())
+        }
+        fn play_bgm(&mut self, request: &AudioRequest) -> Result<(), Box<dyn Error>> {
+            assert!(
+                self.configured,
+                "restored audio needs resource paths and archive parameters"
+            );
+            assert!(
+                matches!(request, AudioRequest::PlayBgm { primary, .. } if primary == b"Synthetic")
+            );
+            self.played.set(true);
+            Ok(())
+        }
+    }
+    let mut code = vec![];
+    commands::command(&mut code, 0x201d, &[0x12345678]);
+    commands::command(&mut code, 0x2013, &[0, 0]);
+    commands::command(&mut code, 0x2128, &[]);
+    commands::command(&mut code, 0x2160, &[0]);
+    let audio_pc = code.len();
+    commands::command(&mut code, 0x20a0, &[0, 0, 1]);
+    commands::command(&mut code, 0x22b2, &[]);
+    commands::command(&mut code, 0x2000, &[]);
+    let root = Root::new("resume-audio-paths", &code, b"Synthetic\0");
+    fs::write(root.0.join("save/system.dat"), auto_resume_save(0x12345678)).unwrap();
+    let script = root.script();
+    let game = root.game();
+    let user = root.0.with_extension("user");
+    let mut backend = RecordingBackend::default();
+    let mut run = Startup::new(&script, &root.0, &game, 0).unwrap();
+    run.set_user_data_directory(&user).unwrap();
+    while run.tick(&mut backend).unwrap() != StartupEvent::SnapshotCaptured {}
+    assert!(run.save_slot(3).unwrap());
+    drop(run);
+    let mut run = Startup::new(&script, &root.0, &game, 0).unwrap();
+    run.set_user_data_directory(&user).unwrap();
+    // Register resources, then load without executing any playback command.
+    while run.machine().pc() != audio_pc {
+        assert_eq!(run.tick(&mut backend).unwrap(), StartupEvent::Progress);
+    }
+    let played = Rc::new(Cell::new(false));
+    run.set_audio_backend(Box::new(Audio {
+        paths_ready: false,
+        configured: false,
+        played: played.clone(),
+    }))
+    .unwrap();
+    run.load_slot(3, &mut backend).unwrap();
+    assert!(played.get());
+    drop(run);
+    fs::remove_dir_all(user).unwrap();
+}
+
+#[test]
+fn kunado_v4_snapshot_restores_text_scene_particles_locals_and_backup_slots() {
+    snapshot_slots_roundtrip(Some("cmvs-20211006"));
+    snapshot_slots_roundtrip(Some("cmvs-20221105"));
+}
+
+#[test]
+fn kazokubu_v2_snapshot_restores_text_scene_particles_locals_and_backup_slots() {
+    snapshot_slots_roundtrip(Some("cmvs-20120309"));
+}
+
 fn snapshot_slots_roundtrip(profile: Option<&str>) {
-    use cmvs_rs::{save::Csv2Save, snapshot::EngineSnapshot};
+    use cmvs_rs::{
+        save::Csv2Save,
+        snapshot::{EngineSnapshot, SnapshotLayout},
+    };
+    let layout = if profile == Some("cmvs-20120309") {
+        SnapshotLayout::TextV2
+    } else if matches!(profile, Some("cmvs-20211006" | "cmvs-20221105")) {
+        SnapshotLayout::TextV3SceneV4
+    } else {
+        SnapshotLayout::TextV3
+    };
+    let collision = profile == Some("cmvs-20171114");
     // A load sets the window title from the base title 0x2160 gives.
     let mut code = string_call(0x2160);
     system_call(&mut code, 0x201d, &[0x12345678]);
@@ -1935,11 +2133,13 @@ fn snapshot_slots_roundtrip(profile: Option<&str>) {
     }
     let collision_points =
         [[-1.0f32, 2.0, 0.0], [1.0, 2.0, 0.0], [0.0, 2.0, 1.0]].map(|p| p.map(f32::to_bits));
-    if profile.is_some() {
+    if collision {
         commands::command(&mut code, 0x2330, &[20]);
         for point in collision_points {
             commands::command(&mut code, 0x2332, &[20, point[0], point[1], point[2]]);
         }
+    }
+    if profile.is_some() {
         commands::command(&mut code, 0x2011, &[0, 10]);
         commands::command(
             &mut code,
@@ -1956,9 +2156,17 @@ fn snapshot_slots_roundtrip(profile: Option<&str>) {
             ],
         );
     }
+    if matches!(profile, Some("cmvs-20211006" | "cmvs-20221105")) {
+        commands::command(&mut code, 0x2022, &[20, 1023]);
+        commands::command(&mut code, 0x2178, &[0, 1023]);
+    }
+    if profile == Some("cmvs-20120309") {
+        commands::command(&mut code, 0x2022, &[20, 511]);
+        commands::command(&mut code, 0x2178, &[0, 511]);
+    }
     let snapshot_pc = code.len();
     code.extend(0x22b2u16.to_le_bytes());
-    if profile.is_some() {
+    if collision {
         commands::command(&mut code, 0x2331, &[20]);
     }
     commands::command(&mut code, 0x2260, &[0; 3]);
@@ -2017,22 +2225,44 @@ fn snapshot_slots_roundtrip(profile: Option<&str>) {
     let first = fs::read(&slot).unwrap();
     let save = Csv2Save::decode(&first).unwrap();
     assert_eq!(&first[16..36], b"2000-01-01 00:00:00 ");
-    let snapshot = EngineSnapshot::decode(&save.snapshot).unwrap();
+    let snapshot = EngineSnapshot::decode_with_layout(&save.snapshot, layout).unwrap();
+    if profile == Some("cmvs-20120309") {
+        for children in [
+            &snapshot.objects[&20].children,
+            &snapshot.windows[0].as_ref().unwrap().scene.children,
+        ] {
+            assert!(children.contains_key(&511));
+            assert!(!children.contains_key(&512));
+        }
+    }
     assert_eq!(
         (snapshot.active_slot, snapshot.pc, snapshot.repeat_count),
         (0, snapshot_pc as u32 + 2, 0)
     );
-    if profile.is_some() {
+    if collision {
         assert_eq!(
             snapshot.objects[&20].collision_vertices.as_deref(),
             Some(collision_points.as_slice())
         );
         assert_eq!(run.scene().object(20).unwrap().collision_vertices, None);
+    }
+    if profile.is_some() {
         let effect =
             cmvs_rs::snapshot::SavedEffect::decode(&snapshot.raw_objects[&(0x800, 0)]).unwrap();
         assert_eq!(effect.image_name(), b"Synthetic");
         assert!(
             matches!(effect, cmvs_rs::snapshot::SavedEffect::Particles { words, .. } if words[5] == 2)
+        );
+    }
+    if matches!(profile, Some("cmvs-20211006" | "cmvs-20221105")) {
+        assert!(snapshot.objects[&20].children.contains_key(&1023));
+        assert!(
+            snapshot.windows[0]
+                .as_ref()
+                .unwrap()
+                .scene
+                .children
+                .contains_key(&1023)
         );
     }
     assert_eq!(snapshot.variables.integers()[5], 42);
@@ -2060,7 +2290,7 @@ fn snapshot_slots_roundtrip(profile: Option<&str>) {
     bad_audio.sound_channels[..32].fill(b'x');
     let bytes = Csv2Save::encode(
         header,
-        &bad_audio.encode().unwrap(),
+        &bad_audio.encode_with_layout(layout).unwrap(),
         &save.auxiliary,
         &save.script_image,
     )
@@ -2092,7 +2322,7 @@ fn snapshot_slots_roundtrip(profile: Option<&str>) {
         callback.stack_pointer = sp as u32;
         let bytes = Csv2Save::encode(
             header,
-            &callback.encode().unwrap(),
+            &callback.encode_with_layout(layout).unwrap(),
             &save.auxiliary,
             &save.script_image,
         )
@@ -2117,7 +2347,7 @@ fn snapshot_slots_roundtrip(profile: Option<&str>) {
     assert_eq!(run.machine().state().integer(5), Some(42));
     assert_eq!(run.machine().state().bit(0), Some(true));
     assert_eq!(run.camera().view(0).unwrap().words, view_words);
-    if profile.is_some() {
+    if collision {
         assert_eq!(
             run.scene()
                 .object(20)
@@ -2126,6 +2356,8 @@ fn snapshot_slots_roundtrip(profile: Option<&str>) {
                 .as_deref(),
             Some(collision_points.as_slice())
         );
+    }
+    if profile.is_some() {
         assert_eq!(run.scene().particle_effects()[&0].particles.len(), 2);
         assert_eq!(
             run.inspect_snapshot().unwrap().raw_objects[&(0x800, 0)],
@@ -2133,6 +2365,17 @@ fn snapshot_slots_roundtrip(profile: Option<&str>) {
         );
     }
 
+    if matches!(profile, Some("cmvs-20211006" | "cmvs-20221105")) {
+        assert!(run.scene().object(20).unwrap().children.contains_key(&1023));
+        assert!(
+            run.inspect_snapshot().unwrap().windows[0]
+                .as_ref()
+                .unwrap()
+                .scene
+                .children
+                .contains_key(&1023)
+        );
+    }
     let restored = run.scene().object(20).unwrap().image.as_ref().unwrap();
     assert!(restored.alpha && !restored.surface && restored.name.is_empty());
     assert!(
@@ -2181,7 +2424,7 @@ fn snapshot_slots_roundtrip(profile: Option<&str>) {
     }
     let changed = Csv2Save::encode(
         header,
-        &with_targets.encode().unwrap(),
+        &with_targets.encode_with_layout(layout).unwrap(),
         &save.auxiliary,
         &save.script_image,
     )
@@ -2193,19 +2436,29 @@ fn snapshot_slots_roundtrip(profile: Option<&str>) {
     with_targets.raw_objects.get_mut(&(0x6a0, 1)).unwrap()[0] = 1;
     let changed = Csv2Save::encode(
         header,
-        &with_targets.encode().unwrap(),
+        &with_targets.encode_with_layout(layout).unwrap(),
         &save.auxiliary,
         &save.script_image,
     )
     .unwrap();
     fs::write(directory.join("save004.dat"), changed).unwrap();
-    let before = run.inspect_snapshot().unwrap().encode().unwrap();
+    let before = run
+        .inspect_snapshot()
+        .unwrap()
+        .encode_with_layout(layout)
+        .unwrap();
     assert!(run.load_slot(4, &mut backend).is_err());
-    assert_eq!(run.inspect_snapshot().unwrap().encode().unwrap(), before);
-    if profile.is_some() {
+    assert_eq!(
+        run.inspect_snapshot()
+            .unwrap()
+            .encode_with_layout(layout)
+            .unwrap(),
+        before
+    );
+    if collision {
         // Corrupt the on-disk 0x749 count rather than asking the checked encoder
         // to produce an invalid scene. The old VM, mesh and particles must survive.
-        let mut mesh_bytes = snapshot.encode().unwrap();
+        let mut mesh_bytes = snapshot.encode_with_layout(layout).unwrap();
         let mut mesh_header = 0x749u16.to_le_bytes().to_vec();
         mesh_header.extend(44u32.to_le_bytes());
         mesh_header.extend(0u32.to_le_bytes());
@@ -2224,7 +2477,13 @@ fn snapshot_slots_roundtrip(profile: Option<&str>) {
                 .to_string()
                 .contains("collision vertex count")
         );
-        assert_eq!(run.inspect_snapshot().unwrap().encode().unwrap(), before);
+        assert_eq!(
+            run.inspect_snapshot()
+                .unwrap()
+                .encode_with_layout(layout)
+                .unwrap(),
+            before
+        );
         assert_eq!(
             run.scene()
                 .object(20)
@@ -2233,12 +2492,14 @@ fn snapshot_slots_roundtrip(profile: Option<&str>) {
                 .as_deref(),
             Some(collision_points.as_slice())
         );
+    }
+    if profile.is_some() {
         let mut malformed = snapshot.clone();
         malformed.raw_objects.get_mut(&(0x800, 0)).unwrap()[24..28]
             .copy_from_slice(&u32::MAX.to_le_bytes());
         let bytes = Csv2Save::encode(
             header,
-            &malformed.encode().unwrap(),
+            &malformed.encode_with_layout(layout).unwrap(),
             &save.auxiliary,
             &save.script_image,
         )
@@ -2257,7 +2518,13 @@ fn snapshot_slots_roundtrip(profile: Option<&str>) {
                 .contains("saved particle count")
         );
         assert_eq!(run.machine().pc(), pc);
-        assert_eq!(run.inspect_snapshot().unwrap().encode().unwrap(), before);
+        assert_eq!(
+            run.inspect_snapshot()
+                .unwrap()
+                .encode_with_layout(layout)
+                .unwrap(),
+            before
+        );
         assert_eq!(
             run.scene().particle_effects()[&0]
                 .particles
@@ -2279,7 +2546,7 @@ fn snapshot_slots_roundtrip(profile: Option<&str>) {
     callback.stack_pointer = (callback.stack.len() - 12) as u32;
     let bytes = Csv2Save::encode(
         header,
-        &callback.encode().unwrap(),
+        &callback.encode_with_layout(layout).unwrap(),
         &save.auxiliary,
         &new_image,
     )
@@ -2698,58 +2965,62 @@ fn first_system_save_without_template_writes_reloads_and_survives_restart() {
 
 #[test]
 fn realive_startup_uses_the_extended_child_table() {
-    let mut code = vec![];
-    commands::command(&mut code, 0x2020, &[7]);
-    commands::command(&mut code, 0x2022, &[7, 1023]);
-    commands::command(&mut code, 0x2000, &[]);
-    let root = Root::new("realive-child-startup", &code, b"");
-    let script = root.script();
-    let game = Registry::builtin()
-        .identify_game(&root.0, Some("cmvs-20190305"))
-        .unwrap();
-    let mut run = Startup::new(&script, &root.0, &game, 0).unwrap();
-    run.set_block_unreviewed(false);
-    let mut backend = RecordingBackend::default();
-    for _ in 0..20 {
-        if run.tick(&mut backend).unwrap() == StartupEvent::Yield {
-            break;
+    for id in ["cmvs-20190305", "cmvs-20190405"] {
+        let mut code = vec![];
+        commands::command(&mut code, 0x2020, &[7]);
+        commands::command(&mut code, 0x2022, &[7, 1023]);
+        commands::command(&mut code, 0x2000, &[]);
+        let root = Root::new("realive-child-startup", &code, b"");
+        let script = root.script();
+        let game = Registry::builtin()
+            .identify_game(&root.0, Some(id))
+            .unwrap();
+        let mut run = Startup::new(&script, &root.0, &game, 0).unwrap();
+        run.set_block_unreviewed(false);
+        let mut backend = RecordingBackend::default();
+        for _ in 0..20 {
+            if run.tick(&mut backend).unwrap() == StartupEvent::Yield {
+                break;
+            }
         }
+        assert!(run.scene().object(7).unwrap().children.contains_key(&1023));
     }
-    assert!(run.scene().object(7).unwrap().children.contains_key(&1023));
 }
 
 #[test]
 fn realive_fullscreen_monitor_selection_survives_configuration_restart() {
-    let mut code = vec![];
-    commands::command(&mut code, 0x23c6, &[5]);
-    commands::command(&mut code, 0x2000, &[]);
-    let root = Root::new("realive-monitor-preference", &code, b"");
-    let script = root.script();
-    let game = Registry::builtin()
-        .identify_game(&root.0, Some("cmvs-20190305"))
-        .unwrap();
-    let directory = root
-        .0
-        .with_file_name(format!("cmvs-realive-monitor-user-{}", std::process::id()));
-    let mut run = Startup::new(&script, &root.0, &game, 0).unwrap();
-    run.set_user_data_directory(&directory).unwrap();
-    run.set_block_unreviewed(false);
-    let mut backend = RecordingBackend::default();
-    for _ in 0..20 {
-        if run.tick(&mut backend).unwrap() == StartupEvent::Yield {
-            break;
+    for id in ["cmvs-20190305", "cmvs-20190405"] {
+        let mut code = vec![];
+        commands::command(&mut code, 0x23c6, &[5]);
+        commands::command(&mut code, 0x2000, &[]);
+        let root = Root::new("realive-monitor-preference", &code, b"");
+        let script = root.script();
+        let game = Registry::builtin()
+            .identify_game(&root.0, Some(id))
+            .unwrap();
+        let directory = root
+            .0
+            .with_file_name(format!("cmvs-realive-monitor-user-{}", std::process::id()));
+        let mut run = Startup::new(&script, &root.0, &game, 0).unwrap();
+        run.set_user_data_directory(&directory).unwrap();
+        run.set_block_unreviewed(false);
+        let mut backend = RecordingBackend::default();
+        for _ in 0..20 {
+            if run.tick(&mut backend).unwrap() == StartupEvent::Yield {
+                break;
+            }
         }
+        assert_eq!(run.platform().fullscreen_monitor_mode(), 5);
+        assert_eq!(backend.requests(), [PlatformRequest::FullscreenMonitor(5)]);
+        run.save_preferences(Default::default()).unwrap();
+        drop(run);
+        let mut resumed = Startup::new(&script, &root.0, &game, 0).unwrap();
+        resumed.set_user_data_directory(&directory).unwrap();
+        assert_eq!(resumed.platform().fullscreen_monitor_mode(), 5);
+        drop(resumed);
+        assert!(directory.starts_with(std::env::temp_dir()));
+        fs::remove_dir_all(directory).unwrap();
     }
-    assert_eq!(run.platform().fullscreen_monitor_mode(), 5);
-    assert_eq!(backend.requests(), [PlatformRequest::FullscreenMonitor(5)]);
-    run.save_preferences(Default::default()).unwrap();
-    drop(run);
-    let mut resumed = Startup::new(&script, &root.0, &game, 0).unwrap();
-    resumed.set_user_data_directory(&directory).unwrap();
-    assert_eq!(resumed.platform().fullscreen_monitor_mode(), 5);
-    drop(resumed);
-    assert!(directory.starts_with(std::env::temp_dir()));
-    fs::remove_dir_all(directory).unwrap();
 }
 
 #[test]

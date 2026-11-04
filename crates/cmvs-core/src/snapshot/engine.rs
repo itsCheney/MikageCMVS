@@ -110,6 +110,7 @@ impl EngineSnapshot {
     }
 
     pub fn decode_with_layout(bytes: &[u8], layout: SnapshotLayout) -> Result<Self, FormatError> {
+        let text_v1_scene_v1 = layout == SnapshotLayout::TextV1SceneV1;
         let records = parse_records(bytes)?;
         let mut at = 0;
         let mut next = |tag: u16| -> Result<&[u8], FormatError> {
@@ -204,20 +205,28 @@ impl EngineSnapshot {
             last = Some((position, index));
             let body = &bytes[record.body.clone()];
             match record.tag {
-                0x380 if index < 12 => {
+                0x380 if index < if text_v1_scene_v1 { 8 } else { 12 } => {
                     out.texts[index as usize] = Some(text::decode_with_layout(body, layout)?)
                 }
-                0x400 if index < 8 => {
-                    out.windows[index as usize] = Some(window::decode(body, &mut nodes)?)
+                0x400 if index < if text_v1_scene_v1 { 4 } else { 8 } => {
+                    out.windows[index as usize] =
+                        Some(window::decode_with_layout(body, &mut nodes, layout)?)
                 }
                 0x700 if index < 256 => {
-                    out.objects
-                        .insert(index as u8, SavedScene::decode(body, 0, &mut nodes)?);
+                    out.objects.insert(
+                        index as u8,
+                        SavedScene::decode_with_layout(body, 0, &mut nodes, layout)?,
+                    );
                 }
                 0x600 | 0x610 | 0x620 | 0x630 => {
                     out.effects[usize::from((record.tag - 0x600) / 0x10)] = Some(body.to_vec());
                 }
                 tag => {
+                    if text_v1_scene_v1 && matches!(tag, 0x380 | 0x400 | 0x8c8) {
+                        return Err(FormatError(
+                            "record exceeds TextV1SceneV1 snapshot object tables",
+                        ));
+                    }
                     let limit = OBJECT_TABLES[position].1;
                     if index >= limit {
                         return Err(FormatError("snapshot object index exceeds its table"));
@@ -240,9 +249,17 @@ impl EngineSnapshot {
             at += 1;
             Ok(&bytes[record.body.clone()])
         };
-        let mut tail = Vec::with_capacity(TAIL.len());
+        let mut tail: Vec<&[u8]> = Vec::with_capacity(TAIL.len());
         for tag in TAIL {
-            tail.push(next(tag)?);
+            if text_v1_scene_v1 && tag == 0x6e0 {
+                tail.push(&[]);
+            } else {
+                tail.push(next(if text_v1_scene_v1 && tag == 0x304 {
+                    0x300
+                } else {
+                    tag
+                })?);
+            }
         }
         out.sound_device = next(0x318)?.to_vec();
         if at != records.len() {
@@ -252,11 +269,15 @@ impl EngineSnapshot {
         out.cameras = std::array::from_fn(|i| tail[1 + i].to_vec());
         out.script_data = tail[5].to_vec();
         let pair = tail[6];
-        let first = usize::from(u16::from_le_bytes([pair[0], pair[1]]));
-        out.bgm = [
-            c_string(&pair[2..2 + first])?,
-            c_string(&pair[4 + first..])?,
-        ];
+        out.bgm = if text_v1_scene_v1 {
+            [c_string(pair)?, Vec::new()]
+        } else {
+            let first = usize::from(u16::from_le_bytes([pair[0], pair[1]]));
+            [
+                c_string(&pair[2..2 + first])?,
+                c_string(&pair[4 + first..])?,
+            ]
+        };
         out.sound_channels = tail[7].to_vec();
         if out.sound_channels.len() != 312 {
             return Err(FormatError(
@@ -271,6 +292,18 @@ impl EngineSnapshot {
     }
 
     pub fn encode_with_layout(&self, layout: SnapshotLayout) -> Result<Vec<u8>, FormatError> {
+        let text_v1_scene_v1 = layout == SnapshotLayout::TextV1SceneV1;
+        if text_v1_scene_v1
+            && (self.texts[8..].iter().any(Option::is_some)
+                || self.windows[4..].iter().any(Option::is_some)
+                || self.raw_objects.keys().any(|&(tag, _)| tag == 0x8c8)
+                || !self.record_6e0.is_empty()
+                || !self.bgm[1].is_empty())
+        {
+            return Err(FormatError(
+                "state has no TextV1SceneV1 snapshot representation",
+            ));
+        }
         let mut out = Writer::default();
         out.string(0x100, &self.save_title)?;
         out.string(0x101, &self.scene_title)?;
@@ -302,8 +335,13 @@ impl EngineSnapshot {
                     0x380 => self.texts[index as usize]
                         .as_ref()
                         .map(|text| text::encode_with_layout(text, layout)),
-                    0x400 => self.windows[index as usize].as_ref().map(window::encode),
-                    0x700 => self.objects.get(&(index as u8)).map(SavedScene::encode),
+                    0x400 => self.windows[index as usize]
+                        .as_ref()
+                        .map(|w| window::encode_with_layout(w, layout)),
+                    0x700 => self
+                        .objects
+                        .get(&(index as u8))
+                        .map(|s| s.encode_with_layout(layout)),
                     _ => self.raw_objects.get(&(tag, index)).cloned().map(Ok),
                 };
                 if let Some(body) = body {
@@ -316,16 +354,22 @@ impl EngineSnapshot {
                 out.record(*tag, None, body)?;
             }
         }
-        out.record(0x6e0, None, &self.record_6e0)?;
+        if !text_v1_scene_v1 {
+            out.record(0x6e0, None, &self.record_6e0)?;
+        }
         for (i, camera) in self.cameras.iter().enumerate() {
             out.record(0x880 + i as u16, None, camera)?;
         }
         out.record(0x900, None, &self.script_data)?;
-        out.0.extend(0x304u16.to_le_bytes());
-        for name in &self.bgm {
-            out.short(name.len() + 1)?;
-            out.0.extend(name);
-            out.0.push(0);
+        if text_v1_scene_v1 {
+            out.string(0x300, &self.bgm[0])?;
+        } else {
+            out.0.extend(0x304u16.to_le_bytes());
+            for name in &self.bgm {
+                out.short(name.len() + 1)?;
+                out.0.extend(name);
+                out.0.push(0);
+            }
         }
         out.record(0x310, None, &self.sound_channels)?;
         out.record(0x318, None, &self.sound_device)?;

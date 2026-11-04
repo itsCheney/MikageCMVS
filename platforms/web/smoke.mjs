@@ -1,0 +1,94 @@
+// Runs the actual generated wasm with synthetic PS2A/CPZ fixtures, without game data.
+import assert from 'node:assert/strict';
+import {readFileSync, existsSync} from 'node:fs';
+import init, {WebRuntime, identify} from './pkg/cmvs_web.js';
+import {BrowserFiles} from './filesystem.mjs';
+import {AudioBridge} from './audio-bridge.mjs';
+globalThis.cmvsAudio=new AudioBridge();
+const fs=new BrowserFiles(bytes => bytes);
+const mount=(path,bytes) => fs.mount(path,{size:bytes.length,slice:(start,end)=>bytes.slice(start,end)});
+const words=[], text=[0];
+function string(value) {const at=text.length;text.push(...new TextEncoder().encode(value),0);return at;}
+const audioPath=string('audio\\'), tone=string('tone.ogg'), loop=string('loop.ogg'),voice=string('voice.ogg');
+const message=string('\\wcA');
+function command(op,args=[]) {
+  for (const arg of [...args].reverse()) words.push(0x40,0x04,4,0,arg&255,(arg>>>8)&255,(arg>>>16)&255,(arg>>>24)&255);
+  words.push(op&255,op>>>8);
+}
+// More than one cooperative budget, followed by a first-launch system save.
+for(let i=0;i<2100;i++) command(0x201e,[1]);
+command(0x215d,[0,7,0,0,64,48,64,48]);
+command(0x2152,[0,0xffffffff,message]);
+command(0x201d,[0x12345678]);
+command(0x2091,[0,2048,0]); command(0x2092,[0,2048,0]);
+command(0x2093,[0,1024,0]); command(0x2094,[0,64,0]);
+command(0x2128); command(0x2092,[2400,1,96]); command(0x2129);
+command(0x2012,[0,audioPath]);command(0x2013,[0,audioPath]);command(0x2014,[0,audioPath]);
+command(0x20a4,[tone,loop,0,1]);
+command(0x20b0,[0,tone,256,0,1]);command(0x20b0,[1,tone,256,0,0]);command(0x20a6,[0,tone,256,1]);command(0x20af,[1,voice,256,1,0x3fc00000]);
+command(0x2000);command(0x20b1,[1,0]);command(0x20a0,[tone,100,1]);command(0x2000);command(0x2001);
+const code=new Uint8Array(words);
+const raw=new Uint8Array(48+code.length+text.length), view=new DataView(raw.buffer);
+raw.set(new TextEncoder().encode('PS2A'));
+[48,0,0,0,code.length,0,text.length,0,0,code.length+text.length,0].forEach((n,i)=>view.setUint32(4+i*4,n,true));
+raw.set(code.map(b => (((b<<1)|(b>>7))+124)&255),48);
+raw.set(text.map(b=>(((b<<1)|(b>>7))+124)&255),48+code.length);
+mount('data/pack/start.ps3',raw);
+mount('data/pack/script.cpz',new Uint8Array(Buffer.from(readFileSync(new URL('../../tests/fixtures/cpz6-script.hex',import.meta.url),'utf8').trim(),'hex')));
+mount('audio/tone.ogg',new Uint8Array(readFileSync(new URL('../../tests/fixtures/audio/mono440.ogg',import.meta.url))));
+mount('audio/loop.ogg',new Uint8Array(readFileSync(new URL('../../tests/fixtures/audio/mono880.ogg',import.meta.url))));
+mount('audio/voice.ogg',new Uint8Array(readFileSync(new URL('../../tests/fixtures/audio/mono660voice.ogg',import.meta.url))));
+mount('cmvs.cfg',new TextEncoder().encode('[WINDOW_RESOLVING]\nBASE=64,48\n'));
+globalThis.cmvsFs=fs;
+await init({module_or_path:readFileSync(new URL('./pkg/cmvs_web_bg.wasm',import.meta.url))});
+const profile='cmvs-20160201';
+console.log("Identifying synthetic game");
+assert.match(identify(profile),/^cmvs-20160201-/);
+const candidates=[process.env.CMVS_TEST_FONT,'C:/Windows/Fonts/msgothic.ttc','/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf'].filter(Boolean);
+const font=candidates.find(existsSync); if(!font) throw Error('Set CMVS_TEST_FONT to a TTF/OTF/TTC file');
+console.log("Creating runtime");
+const runtime=new WebRuntime(new Uint8Array(readFileSync(font)),0,profile,false);
+assert.equal(runtime.needs_input(),true);
+runtime.set_clock(new Uint16Array([2026,1,1,12,0,0]));
+assert.equal(runtime.tick(16,new Uint8Array([1]),8,8,true),0);
+assert.equal(runtime.needs_input(),false);
+assert.throws(() => runtime.pixels(),/no completed frame/);
+// Text output yields once before the following script commands resume.
+assert.equal(runtime.tick(16,new Uint8Array(),-1,-1,true),1);
+assert.equal(runtime.tick(16,new Uint8Array(),-1,-1,true),1);
+assert.equal(runtime.width(),64); assert.equal(runtime.height(),48);
+assert.equal(new TextDecoder().decode(fs.read('/user/system.dat',0,4)),'CSS1');
+assert.equal(runtime.save_preferences(),true);
+assert.ok(fs.size('/user/cmvs.cfg')>0);
+assert.equal(runtime.pixels().length,runtime.width()*runtime.height()*4);
+const commands=globalThis.cmvsAudio.take();
+for(const id of [1,5,6,9]) {
+  assert.ok(commands.some(c=>c.op==='begin' && c.id===id));
+  const chunks=commands.filter(c=>c.op==='samples' && c.id===id);
+  assert.ok(chunks.some(c=>c.pcm.some(x=>Math.abs(x)>.05)));
+  if(id===1) assert.ok(chunks.reduce((n,c)=>n+c.pcm.length,0)<=2400);
+  else if(id!==6) assert.ok(chunks.at(-1).ended);
+}
+assert.ok(!commands.some(c=>c.op==='begin' && c.id===10));
+const bgm=commands.find(c=>c.op==='begin' && c.id===1);
+globalThis.cmvsAudio.report({time:200,positions:[[1,bgm.epoch,200]]});
+assert.equal(runtime.tick(16,new Uint8Array(),-1,-1,false),3);
+assert.ok(globalThis.cmvsAudio.take().some(c=>c.op==='samples' && c.id===1));
+assert.equal(runtime.tick(16,new Uint8Array(),-1,-1,true),1);
+const nextAudio=globalThis.cmvsAudio.take();
+assert.ok(nextAudio.some(c=>c.op==='begin' && c.id===10));
+assert.ok(nextAudio.some(c=>c.op==='begin' && c.id===0 && c.fadeMs===100));
+assert.ok(nextAudio.some(c=>c.op==='fade' && c.id===1 && c.ms===100));
+assert.equal(runtime.tick(16,new Uint8Array(),-1,-1,true),2);
+assert.ok(globalThis.cmvsAudio.take().some(c=>c.op==='stop' && c.id===1));
+runtime.free();
+const saves=fs.snapshot();
+assert.ok(saves.some(([path])=>path==='/user/system.dat'));
+fs.restore(saves);
+const resumed=new WebRuntime(new Uint8Array(readFileSync(font)),0,profile,false);
+assert.equal(resumed.tick(16,new Uint8Array(),-1,-1,true),0);
+assert.equal(resumed.tick(16,new Uint8Array(),-1,-1,true),1);
+assert.equal(resumed.tick(16,new Uint8Array(),-1,-1,true),1);
+assert.ok(fs.size('/user/system.bak')>0);
+resumed.free();
+console.log('Wasm smoke passed: archive I/O, budget slices, text output, complete frame, CSS1 writes/backups, preferences, restart, streaming BGM/SE/voice, refill, quit, drop');

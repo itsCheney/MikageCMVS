@@ -1,6 +1,8 @@
 //! Bounded real-data startup orchestration for the researched Amatsutsumi layout.
 //! Snapshots remain barriers unless the caller explicitly continues without an image.
 //! Every system command first passes the selected engine profile's gate.
+use crate::filesystem as fs;
+use crate::filesystem::File;
 use crate::{
     MAX_PAYLOAD,
     audio::{AudioBackend, AudioHost, RecordingAudio},
@@ -35,7 +37,6 @@ use crate::{
 };
 use std::{
     error::Error,
-    fs::File,
     io::Read,
     path::{Path, PathBuf},
 };
@@ -195,12 +196,12 @@ impl<'a> Startup<'a> {
         // 0x14000a3c0 reads the startup settings; cmvs.cfg is optional and read only.
         let configuration = crate::settings::Configuration::read(&root.join("cmvs.cfg"))?
             .unwrap_or(crate::settings::Configuration::new(Vec::new())?);
-        let screen_size = configuration.screen_size()?;
+        let screen_size = configuration.screen_size_for_profile(game.selection.profile)?;
         let mut scene = SceneHost::for_profile(game.selection.profile);
         scene.set_screen_size(screen_size);
         let mut buttons = ButtonHost::default();
         buttons.set_screen_size(screen_size);
-        let mut camera = CameraHost::default();
+        let mut camera = CameraHost::for_profile(game.selection.profile);
         camera.set_screen_size(screen_size);
         let mut messages = MessageHost::for_profile(game.selection.profile);
         messages.set_screen_size(screen_size);
@@ -257,7 +258,7 @@ impl<'a> Startup<'a> {
             buttons,
             movies: MovieHost::default(),
             scene_movies: ResourceArchives::new(root)?,
-            root: root.canonicalize()?,
+            root: fs::canonicalize(root)?,
             sequence: SequenceHost::default(),
             camera,
             capture: ScreenCapture::default(),
@@ -555,6 +556,10 @@ impl<'a> Startup<'a> {
     pub fn save_image(&self) -> &SaveImage {
         &self.save_image
     }
+    /// Service host-driven output independently of VM/frame progression, including inactivity.
+    pub fn poll_audio_output(&mut self) -> Result<(), Box<dyn Error>> {
+        self.audio_backend.update()
+    }
     pub fn audio(&self) -> &AudioHost {
         &self.audio
     }
@@ -592,7 +597,7 @@ impl<'a> Startup<'a> {
         let saves = DirectorySaves::new(profile.directory())?;
         let configuration = profile.read_configuration()?;
         let primary = profile.path();
-        let source = if primary.try_exists()? {
+        let source = if fs::try_exists(&primary)? {
             primary
         } else {
             self.root.join("save/system.dat")
@@ -739,7 +744,7 @@ impl<'a> Startup<'a> {
                 }),
             };
         }
-        let id = self.bootstrap.settings().get(&0x201d).copied();
+        let id = self.system_save_identifier();
         if command == 0x129
             && let Some(output) = &mut self.system_output
         {

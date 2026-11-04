@@ -2,6 +2,16 @@
 
 所有命令从项目根目录执行。这里使用 `<游戏目录>` 和 `<新输出文件>` 作为占位符，请替换后运行。工具只支持已核对的格式分支，不能据解析成功推断整款游戏可运行。当前真实样本验证来自[《アマツツミ》](../games/amatsutsumi/README.md)。
 
+每个工具均支持 `-h` / `--help`，帮助输出到标准输出并以0退出；参数错误输出到标准错误并以非零状态退出，同时提示帮助入口。路径含空格时使用引号。导出文件必须不存在，`cmvs-probe --out` 也必须指定新目录；桌面端独立用户目录中的存档和配置则会正常更新。
+
+```bash
+cargo run --offline --bin cmvs-cpz -- --help
+cargo run --offline --features desktop --bin cmvs-desktop -- --help
+cargo run --offline --features audio-output --bin cmvs-audio -- --help
+```
+
+`cargo run` 的 `--` 用于分隔Cargo选项与工具参数。`cmvs-desktop`、`cmvs-mgv` 需要 `desktop` feature，`cmvs-audio` 需要 `audio-output`；`cmvs-probe` 使用 `-p cmvs-probe` 运行。
+
 ## 脚本与执行跟踪
 
 ```bash
@@ -19,7 +29,7 @@ cargo run --offline --bin cmvs-trace -- "<游戏目录>/data/pack/start.ps3" --s
 cargo run --offline --bin cmvs-trace -- "<游戏目录>/data/pack/start.ps3" --bootstrap --save-dir "<游戏目录>/save" --system-save "<游戏目录>/save/system.dat" --script-archive "<游戏目录>/data/pack/script.cpz" --record-platform "<游戏目录>" --continue-without-snapshot --frame-ms 16 --steps 1000000
 ```
 
-trace先识别引擎档案：输入脚本（或`--script`归档）、`--script-archive`及`--record-platform`根目录exe参与哈希比对，以`# engine profile`和`# profile evidence`打印。未登记的游戏或合成脚本需显式`--profile <id>`。命令先经闸门：Base、Inherited、Reviewed与带有效登记证明的ContractEquivalent进入现有分派，Absent/NoOp总是报错。**2026-11-01 M3 变更：旧Presumed不再默认放行**，仅`--allow-presumed`研究放行；Unreviewed仍需独立的`--allow-unreviewed`并记录首次使用。派生档案在退出时打印各来源已放行分派尝试数、契约/研究命令列表及策略（含等待重试和未实现处理器的尝试，不等于完成或覆盖率），闸门错误以非零退出码结束。完整迁移与证明失效规则见[M3](../design/command-contracts-m3.md)。
+trace先识别引擎档案：输入脚本（或`--script`归档）、`--script-archive`及`--record-platform`根目录exe参与哈希比对，以`# engine profile`和`# profile evidence`打印。未登记的游戏或合成脚本需显式`--profile <id>`。命令先经闸门：Base、Inherited、Reviewed与带有效登记证明的ContractEquivalent进入现有分派，Absent/NoOp总是报错。Presumed、Unreviewed默认放行，分别用`--block-presumed`、`--block-unreviewed`显式阻止；未复核命令记录首次使用。派生档案在退出时打印各来源已放行分派尝试数、契约/研究命令列表及策略（含等待重试和未实现处理器的尝试，不等于完成或覆盖率），闸门错误以非零退出码结束。完整迁移与证明失效规则见[M3](../design/command-contracts-m3.md)。
 
 `--bootstrap` 应用已核对的初始化；`--save-dir` 只读扫描剧情槽，不会自动推断 `--system-save`。记录平台请求不创建窗口，帧时间必须显式提供；省略 `--frame-ms` 时冻结时间并在等待处停止。增加步数不能绕过未知命令、快照或完整恢复屏障。VM 地址及语义见[本作证据](../games/amatsutsumi/vm-semantics.md)。
 
@@ -52,7 +62,7 @@ cargo run --offline --release --features desktop --bin cmvs-mgv -- "<游戏目�
 
 `cmvs-cpz` 支持 CPZ3、CPZ5（打包模式 5～9）、CPZ6 模式 1 和 CPZ7（资源模式 0/1）。默认检查头部，`--list` 列目录，`--extract` 提取资源，`--script` 解码 PS2A 容器；CPZ3 不需要启动参数，列目录和提取前始终验证索引密文校验值。
 
-读取 CPZ5/7 时自动查找封包同目录的 `start.ps3`（CPZ5 也查找 `start.ps2`），可用 `--start-script <路径>` 覆盖；CPZ7 另支持 `--keys <k0,k1,k2,k3>`。CPZ5 可用 `--packing-mode <5..9>` 指定模式，无启动设置时按索引结构自动识别；CPZ7 未找到设置时使用零参数。CPZ5/7 始终验证头部及索引，CLI 提取不验证资源校验值。PB3 的导出为顶向下 RGBA；CUR 的可选 `--planes <新文件>` 导出 AND/XOR 平面，不是 RGBA。具体布局和限制见[格式目录](../README.md)。
+读取 CPZ5/7 时自动查找封包同目录的 `start.ps3`（CPZ5 也查找 `start.ps2`），可用 `--start-script <路径>` 覆盖；CPZ7 另支持 `--keys <k0,k1,k2,k3>`。CPZ5 可用 `--packing-mode <5..9>` 指定模式，无启动设置时按索引结构自动识别；CPZ7 未找到设置时使用零参数。CPZ5/7 始终验证头部及索引，CLI 提取不验证资源校验值。PB3 的导出为顶向下 RGBA；CUR 支持单图 8/32 位 BI_RGB，`--planes <新文件>` 导出 AND/RGB 平面（不含 alpha），`--rgba <新文件>` 导出 straight RGBA，遇到旧式反色像素显式报错。具体布局和限制见[格式目录](../README.md)。
 
 ## 存档
 
@@ -83,7 +93,7 @@ python -I tools/probe_matrix.py "<输出目录1>" "<输出目录2>" --markdown
 对任意已识别构建运行与游戏无关的检查，写出 `summary.json`（身份、能力、参数、清单使用情况，以及各检查的结果和判定等级）与 `events.jsonl`。`--help` 逐行列出全部检查 ID 及其含义，并标出默认运行的那几项。默认只运行静态检查（S1–S5）和启动检查（R1、D1），几秒即可完成；其余检查要玩剧情或整条路线，只在 `--checks` 中列出时运行，`--checks all` 运行全部。
 
 - 游戏目录只读。每次运行都在输出目录下新建用户目录，输出目录本身必须不存在。
-- 命令闸门照常生效；`--allow-presumed`/`--allow-unreviewed` 仅供研究，并记入报告。
+- 命令闸门照常生效；`--block-presumed`/`--block-unreviewed` 分别阻止旧推定和未复核命令，默认均放行；策略记入报告。
 - `--device keyboard` 使用 `key.cfg` 中的按键，按钮通过导航键沿按钮链接选中。
 - `--fork save` 让路线分支从选项处写下的检查点读档开始，而不是每次从头重放；构建缺少快照布局能力时自动退回重放。
 - `--without-snapshots` 显式选择无快照研究：保留快照命令的实时状态影响，但不生成可保存图像；V1–V4标为跳过，不能与 `--fork save` 合用。适用于已知部分快照布局、但剧情中的活动效果仍无法保存的构建，不代表存读档通过。

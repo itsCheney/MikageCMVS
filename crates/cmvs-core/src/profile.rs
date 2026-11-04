@@ -32,12 +32,16 @@ pub enum Semantics {
 /// Static implementation identifiers; execution obeys the unreviewed block policy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VariantId {
+    InputPress,
     FontCells,
     TextAlpha,
     ObjectQueue,
     ListSelect,
     Particles,
     BackgroundAudio,
+    SeRestart,
+    AudioPreload,
+    PolarPoint,
     FallingBillboards,
     CollisionParticles,
     Fragments,
@@ -49,12 +53,16 @@ pub enum VariantId {
 impl VariantId {
     pub fn parse(name: &str) -> Option<Self> {
         match name {
+            "input-press" => Some(Self::InputPress),
             "list-select" => Some(Self::ListSelect),
             "object-queue" => Some(Self::ObjectQueue),
             "text-alpha" => Some(Self::TextAlpha),
             "font-cells" => Some(Self::FontCells),
             "particles" => Some(Self::Particles),
             "background-audio" => Some(Self::BackgroundAudio),
+            "se-restart" => Some(Self::SeRestart),
+            "audio-preload" => Some(Self::AudioPreload),
+            "polar-point" => Some(Self::PolarPoint),
             "falling-billboards" => Some(Self::FallingBillboards),
             "collision-particles" => Some(Self::CollisionParticles),
             "fragments" => Some(Self::Fragments),
@@ -67,12 +75,16 @@ impl VariantId {
     }
     pub fn name(self) -> &'static str {
         match self {
+            Self::InputPress => "input-press",
             Self::ListSelect => "list-select",
             Self::ObjectQueue => "object-queue",
             Self::TextAlpha => "text-alpha",
             Self::FontCells => "font-cells",
             Self::Particles => "particles",
             Self::BackgroundAudio => "background-audio",
+            Self::SeRestart => "se-restart",
+            Self::AudioPreload => "audio-preload",
+            Self::PolarPoint => "polar-point",
             Self::FallingBillboards => "falling-billboards",
             Self::CollisionParticles => "collision-particles",
             Self::Fragments => "fragments",
@@ -237,6 +249,20 @@ impl EngineProfile {
     pub fn count(&self, status: CommandStatus) -> usize {
         self.statuses.iter().filter(|&&s| s == status).count()
     }
+    /// Independently inspected ASUKIMI build and its inherited command schema.
+    pub(crate) fn is_inspected_20071117(&self) -> bool {
+        self.id == "cmvs-20071117"
+            && self.base.as_deref() == Some("cmvs-20160201")
+            && self
+                .binary(
+                    &crate::digest::parse_hex(
+                        "caff7901a7dc4ec963d7fde358028cdd68dfd87fc7925c9715a20e7a5f36d02b",
+                    )
+                    .expect("static SHA-256"),
+                )
+                .is_some()
+    }
+
     pub fn binary(&self, sha256: &[u8; 32]) -> Option<&Binary> {
         self.binaries.iter().find(|b| &b.sha256 == sha256)
     }
@@ -451,14 +477,19 @@ pub struct Registry {
     contracts: BTreeMap<[u8; 32], ContractProof>,
 }
 
-const BUILTIN_PROFILES: [&str; 8] = [
+const BUILTIN_PROFILES: [&str; 13] = [
+    include_str!("../profiles/cmvs-20071117.profile"),
     include_str!("../profiles/cmvs-20110525.profile"),
+    include_str!("../profiles/cmvs-20120309.profile"),
     include_str!("../profiles/cmvs-20130131.profile"),
     include_str!("../profiles/cmvs-20140217.profile"),
     include_str!("../profiles/cmvs-20150405.profile"),
     include_str!("../profiles/cmvs-20160201.profile"),
     include_str!("../profiles/cmvs-20171114.profile"),
     include_str!("../profiles/cmvs-20190305.profile"),
+    include_str!("../profiles/cmvs-20190405.profile"),
+    include_str!("../profiles/cmvs-20211006.profile"),
+    include_str!("../profiles/cmvs-20221105.profile"),
     include_str!("../profiles/cmvs-20171129.profile"),
 ];
 const BUILTIN_GAMES: &str = include_str!("../profiles/games.txt");

@@ -4,7 +4,7 @@
 
 ## 目标与当前状态
 
-目标是用 Rust 实现 CMVS 全平台支持，先完成平台无关核心，再通过后端接入系统服务。已有无第三方依赖的核心、研究 CLI、Windows 桌面预览、可选 wgpu 渲染与音频；其他平台尚未完成构建与行为验证。
+目标是用 Rust 实现 CMVS 全平台支持，先完成平台无关核心，再通过后端接入系统服务。已有原生目标无第三方依赖的核心、研究 CLI、Windows 桌面预览、可选 wgpu 渲染与音频；其他平台尚未完成构建与行为验证。
 
 当前仅《アマツツミ》PC 样本建立了真实验证档案。五条结局选择链和 OP 已在显式预览条件下通过记录重放回到标题，鉴赏列表、四页入口、首张 CG 及滚动/惯性已通过记录重放，完整选项与原生输出仍待验证。剧情存读档已接入运行时，游戏内工具栏、存读档画面与回看经自动回调调度可用（字号范围外字形等快照状态仍显式报错），全分支和原生完整路线尚未验证；详细运行条件和证据统一见[游戏档案](games/amatsutsumi/README.md)，原有阶段步数表保留在[开发历史](games/amatsutsumi/history.md#原架构文档中的阶段验证详情)。
 
@@ -14,16 +14,17 @@
 
 | 包 | 职责 | 依赖边界 |
 |---|---|---|
-| `crates/cmvs-core` | 格式、资源读取、VM、命令语义、场景状态、软件呈现、动作输入与后端契约 | 无第三方依赖；包含基于 `std` 的只读文件适配器，不调用原生窗口或设备 API |
+| `crates/cmvs-core` | 格式、资源读取、VM、命令语义、场景状态、软件呈现、动作输入与后端契约 | 原生目标无第三方依赖；包含基于 `std` 的只读文件适配器，wasm32 通过 wasm-bindgen 接入 Worker 文件接口，不调用原生窗口或设备 API |
 | `crates/cmvs-wgpu` | 共享队列的 GPU 合成、纹理缓存、呈现及按需读回 | 依赖 core、wgpu、pollster；桌面通过可选 feature 接入 |
-| `crates/cmvs-audio` | Vorbis 解码、原生音频输出、源消费时钟 | 依赖 core、lewton、rodio |
+| `crates/cmvs-audio` | Vorbis 解码、原生音频输出、源消费时钟 | 依赖 core、lewton；默认 native feature 启用 rodio |
 | `crates/cmvs-desktop` | 窗口、物理输入、字体光栅化与按名解析、帧显示与桌面运行入口 | 依赖 core、winit、softbuffer、ico、encoding_rs、ab_glyph；可选依赖 audio；系统服务经 cmvs-native |
-| `crates/cmvs-native` | 操作系统服务的统一接口（字体对话框、系统字体目录），按平台分模块；工作区唯一的 FFI 包 | raw-window-handle；Windows 上 windows-sys。macOS/iOS/Linux/Android/wasm 预留，返回 Unsupported |
+| `crates/cmvs-native` | 操作系统服务的统一接口（字体对话框、系统字体目录），按平台分模块；原生系统 FFI 包 | raw-window-handle；Windows 上 windows-sys。macOS/iOS/Linux/Android/wasm 预留，返回 Unsupported |
+| `platforms/web/native` | wasm Worker 宿主、CPU/WebGPU 画面、文字与输入 | 依赖 core、font、无原生设备 feature 的 audio、wasm-bindgen、self_cell；[当前范围](backends/web.md) |
 | 根包 `cmvs-rs` | 检查 CLI、`cmvs_rs` 兼容重导出、集成测试 | 默认仅依赖 core；通过 `desktop`、`audio-output` 选择后端 |
 
 依赖方向为 `desktop → core`、`desktop → audio → core`。格式、VM 和软件呈现目前保持为 core 内部模块，不新增 C++ 运行核心。后续平台应复用核心语义，通过后端接入系统服务。
 
-默认 workspace 成员仅为根包；全 workspace 构建会额外选择桌面和音频成员。除 `cmvs-native` 外，所有项目包继承 `unsafe_code = forbid` 和严格 Clippy 约定；`cmvs-native` 设为 deny，只在注明 SAFETY 的系统调用处局部允许。新平台在该包内增加同名函数的模块实现，宿主代码不写平台条件；某平台需要独立宿主或依赖很重时（如 wasm）再拆为单独的包。feature 转发、固定依赖及拆包回归证据见 [workspace](workspace.md)，参考项目提交与许可见 [references](games/amatsutsumi/references.md)。
+默认 workspace 成员仅为根包；全 workspace 构建会额外选择桌面和音频成员。除 `cmvs-native` 外，所有项目包继承 `unsafe_code = forbid` 和严格 Clippy 约定；`cmvs-native` 设为 deny，只在注明 SAFETY 的系统调用处局部允许。新平台在该包内增加同名函数的模块实现，宿主代码不写平台条件；某平台需要独立宿主或依赖很重时拆为单独的包，wasm 宿主已独立为 `cmvs-web`。feature 转发、固定依赖及拆包回归证据见 [workspace](workspace.md)，参考项目提交与许可见 [references](games/amatsutsumi/references.md)。
 
 ## 核心职责
 
@@ -35,13 +36,14 @@
 - `cpz::ArchiveIndex` / `ArchiveLayout` 按签名分派；当前支持 CPZ3、CPZ5 打包模式 5～9、CPZ6 模式 1 和 CPZ7（资源模式 0/1）。CPZ7 使用每包参数，默认为零；CPZ3 无需启动参数，始终验证索引密文校验值；CPZ5/7 验证头部与索引摘要。公共资源读取验证各格式的数据校验值，CPZ6 头部/索引摘要尚未验证。
 - PB3 支持 type 1、type 3/JBP1、type 5，以及需要参考底图的 type 6；其他分支显式报错。type 5/6 已有 23 个不同真实输出与独立 Python 逐字节对照，未宣称全包覆盖。
 - CMV6 与 JBPD 支持已核对的全屏影片容器和帧解码；无实际音轨的 CMV6 与静音 CMV9 支持 0x2308 初始场景绑定、默认模式 0 的段播放与循环，CMV9 另缓存静态底图，其他槽控制仍未实现。影片计时、画面解码和设备音轨播放分开。
+- MGV1 按名义帧表解码 Ogg/Theora。容器尺寸须精确等于 Theora picture 或 coded 尺寸；前者裁可见区域，后者保留整个编码表面（如 1920×1088），再按逻辑画布呈现。帧率、YUV420 与像素预算校验保留，见[Hapymaher RE](games/hapymaher_re/README.md#1080p-素材边界)。
 
 `resources::ResourceArchives` 按资源族和注册槽号查找首个命中项：图像十槽，SE/BGM/语音各四槽。归档惰性打开，注册路径变化时重开；缓存键包含资源族与槽号。缺失返回 miss，坏归档、校验失败、路径逃逸明确报错。名称规则和覆盖顺序按证据实现，不套用宿主文件系统的隐式行为。
 
 `image` 在共享读取层之上负责图像来源与解码分派，供场景、消息窗口和遮罩共同使用：
 
 - `pb3::decode` 无 I/O；type 6 通过 `decode_with_base` 或 `image::load` 获得参考上下文，不猜底图路径。
-- `image::load` 经同一 `ImageSource` 与注册源递归读取底图，拒绝循环，限制最多 16 个活动文件及累计原始/RGBA 声明长度 64 MiB。
+- `image::load` 经同一 `ImageSource` 与注册源递归读取底图，拒绝循环，限制最多 16 个活动文件及累计原始/RGBA 声明长度 128 MiB；单文件与单图仍分别限制 64 MiB。
 - `image/cache.rs` 保存 `0x203f` 的下一次读取提示与原始字节 LRU，当前留存上限 32 MiB/1024 项；启动容量配置尚未接入。它与 CPZ 索引缓存及已解码 RGBA 分开。
 - `ImageRead` 延迟提交 token 使底图原始字节先于外层提交；解码失败也完成该缓存提交，但不提交 VM 命令或替换旧图像。直接 raw read 在返回前提交。
 
@@ -69,7 +71,7 @@
 
 - **档案**（`EngineProfile`）对应一个构建：同一构建的x86/x64 exe合为一个档案，分别登记身份与switch。命令状态为`Base`、`Inherited`、`Unreviewed`、`NoOp`或`Absent`，越界一律Absent。`Inherited`必须附同架构根/派生exe哈希及完整依赖指纹，由Registry校验证据身份；它不代表完整运行验证或Rust已经实现。初始表由`cmvs-profile table`生成，继承表经IDA导出与标准库比较，见[设计第13节](design/engine-profiles.md#13-p2-实施与使用2026-10-31)。
 - **游戏记录**（`GameRecord`，`games.txt`）把启动脚本与脚本包的 SHA-256 映射到档案，并登记游戏 ID（`0x201d` 参数）、配套 exe 和本作专属策略。选择时按数据哈希找记录，根目录存在的 exe 必须是记录中的构建；`--profile` 可显式选择（研究用，记录只在数据也匹配时生效）。没有匹配就报错，从不默认。
-- **闸门**（`CommandGate`）在runner、trace和桌面的分派链之前统一检查：Base/Inherited/Reviewed/ContractEquivalent进入现有分派（Reviewed须有复核记录；ContractEquivalent须有独立登记证明并通过二进制/case/规则哈希校验）；Absent/NoOp总是报错；旧Presumed与Unreviewed均默认停止，分别由`--allow-presumed`和`--allow-unreviewed`研究放行。`0x201d`声明必须与游戏记录一致。GateCounts分别统计各来源分派尝试（含等待重试与未实现处理器），不是完成数/覆盖率；trace和桌面退出时打印同一来源列表与策略，runner暴露同一API。闸门不改变已放行命令的执行顺序与语义。证明登记、依赖变更失效和撤销见[M3](design/command-contracts-m3.md)。
+- **闸门**（`CommandGate`）在runner、trace和桌面的分派链之前统一检查：Base/Inherited/Reviewed/ContractEquivalent进入现有分派（Reviewed须有复核记录；ContractEquivalent须有独立登记证明并通过二进制/case/规则哈希校验）；Absent/NoOp总是报错；旧Presumed与Unreviewed均默认放行，分别由`--block-presumed`和`--block-unreviewed`显式阻止。`0x201d`声明必须与游戏记录一致。GateCounts分别统计各来源分派尝试（含等待重试与未实现处理器），不是完成数/覆盖率；trace和桌面退出时打印同一来源列表与策略，runner暴露同一API。闸门不改变已放行命令的执行顺序与语义。证明登记、依赖变更失效和撤销见[M3](design/command-contracts-m3.md)。
 - `exe` 只读解析 PE 头并按 2007–2023 年观察到的固定字节形态定位唯一的系统命令 switch；其他形态显式报错。`digest` 是无依赖的 SHA-256。
 
 代码注释中不带档案前缀的原版地址一律指根档案 `cmvs-20160201`（《アマツツミ》）的 x64 exe；其他构建的地址只出现在档案表和游戏文档中。
