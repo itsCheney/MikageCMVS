@@ -23,6 +23,38 @@ use std::{collections::BTreeMap, error::Error, io::Write, path::Path};
 /// Local wall-clock fields for save labels: year, month, day, hour, minute, second.
 pub type SaveTime = [u16; 6];
 
+/// UTC save label fields for `seconds` since 1970-01-01 (proleptic Gregorian calendar).
+pub fn save_time_from_unix(seconds: u64) -> SaveTime {
+    let (days, rest) = ((seconds / 86_400) as i64, seconds % 86_400);
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    [
+        year.clamp(0, i64::from(u16::MAX)) as u16,
+        month as u16,
+        day as u16,
+        (rest / 3600) as u16,
+        (rest / 60 % 60) as u16,
+        (rest % 60) as u16,
+    ]
+}
+
+/// Host save clock in UTC: the standard library has no local time zone without platform
+/// calls, so every host labels saves identically. A clock before 1970 reads as the epoch.
+pub fn utc_save_time() -> SaveTime {
+    save_time_from_unix(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs()),
+    )
+}
+
 /// Constructor value of +12080, written to header offset 8; only an unimplemented
 /// command changes it.
 const HEADER_WORD_8: u32 = 0x1_0000;
@@ -160,6 +192,9 @@ fn snapshot_layout(profile: &crate::profile::EngineProfile) -> Option<SnapshotLa
     if profile.is_inspected_20071117() {
         return Some(SnapshotLayout::TextV1SceneV1);
     }
+    if profile.is_inspected_20080719() || profile.is_inspected_20080903() {
+        return Some(SnapshotLayout::TextV1SceneV2);
+    }
     if (matches!(
         profile.id.as_str(),
         "cmvs-20110525" | "cmvs-20130131" | "cmvs-20140217" | "cmvs-20150405"
@@ -210,7 +245,9 @@ fn effect_layout_supported(profile: &crate::profile::EngineProfile) -> bool {
     (matches!(
         profile.id.as_str(),
         "cmvs-20110525" | "cmvs-20171114" | "cmvs-20171129"
-    ) || inspected_20120309(profile)
+    ) || profile.is_inspected_20080719()
+        || profile.is_inspected_20080903()
+        || inspected_20120309(profile)
         || inspected_20221105(profile)
         || (profile.id == "cmvs-20211006"
             && profile
@@ -225,6 +262,9 @@ fn effect_layout_supported(profile: &crate::profile::EngineProfile) -> bool {
 }
 
 fn effect_record_supported(profile: &crate::profile::EngineProfile, body: &[u8]) -> bool {
+    if profile.is_inspected_20080903() || body.get(..4) == Some(&[1, 0, 4, 0]) {
+        return profile.is_inspected_20080903() && body.get(..4) == Some(&[1, 0, 4, 0]);
+    }
     if inspected_20221105(profile)
         && profile.base.as_deref() == Some("cmvs-20160201")
         && body == [1, 0, 8, 0]
@@ -235,7 +275,7 @@ fn effect_record_supported(profile: &crate::profile::EngineProfile, body: &[u8])
     effect_layout_supported(profile)
         // These builds' type-5 writer/readers are independently inspected. Other
         // configurations still need their own runtime and snapshot evidence.
-        && (!matches!(profile.id.as_str(), "cmvs-20110525" | "cmvs-20120309" | "cmvs-20211006" | "cmvs-20221105")
+        && (!matches!(profile.id.as_str(), "cmvs-20080719" | "cmvs-20110525" | "cmvs-20120309" | "cmvs-20211006" | "cmvs-20221105")
             || body.get(..4) == Some(&[1, 0, 5, 0]))
 }
 
@@ -263,9 +303,12 @@ fn validate_512_child_slots_without_button_lists<'a>(
 
 impl Startup<'_> {
     pub(super) fn system_save_identifier(&self) -> Option<u32> {
-        // 0x40bdf0 zeroes the CSS1 header and never writes offset 68. This is a
-        // format constant for the inspected build, not a recovered game identifier.
-        if snapshot_layout(self.gate.selection().profile) == Some(SnapshotLayout::TextV1SceneV1) {
+        // 20071117 0x40bdf0 / 20080719 0x40bea0 zero the CSS1 header and never
+        // write offset 68: a format constant, not a recovered game identifier.
+        if self.gate.selection().profile.is_inspected_20071117()
+            || self.gate.selection().profile.is_inspected_20080719()
+            || self.gate.selection().profile.is_inspected_20080903()
+        {
             Some(0)
         } else {
             self.bootstrap.settings().get(&0x201d).copied()
@@ -276,15 +319,13 @@ impl Startup<'_> {
         snapshot: &EngineSnapshot,
         layout: SnapshotLayout,
     ) -> Result<(), Box<dyn Error>> {
-        if layout == SnapshotLayout::TextV1SceneV1 {
+        if layout.text_version() == 1 {
             if snapshot.effects[2].is_some() {
                 return Err("old mask snapshot records are not implemented".into());
             }
-            if let Some(&(tag, _)) = snapshot
-                .raw_objects
-                .keys()
-                .find(|&&(tag, _)| matches!(tag, 0x800 | 0x8c8))
-            {
+            if let Some(&(tag, _)) = snapshot.raw_objects.keys().find(|&&(tag, _)| {
+                tag == 0x8c8 || tag == 0x800 && layout == SnapshotLayout::TextV1SceneV1
+            }) {
                 return Err(format!("old snapshot record {tag:#x} is not implemented").into());
             }
         }
@@ -413,7 +454,7 @@ impl Startup<'_> {
                 self.scene.saved_mask(),
                 self.scene.saved_strip(),
             ],
-            record_6e0: if layout == SnapshotLayout::TextV1SceneV1 {
+            record_6e0: if layout.text_version() == 1 {
                 if self.sequence.saved()? != crate::sequence::SequenceHost::default().saved()? {
                     return Err("sequence state has no v1 snapshot representation".into());
                 }
@@ -686,6 +727,11 @@ impl Startup<'_> {
             .as_deref()
             .map(crate::scene::Quake::restore)
             .transpose()?;
+        if quake.as_ref().is_some_and(|q| q.mode & 0xf00 == 0x100)
+            && !self.scene.allow_triangle_quake
+        {
+            return Err("triangle quake restore requires the inspected build".into());
+        }
         let fade = snapshot.effects[1]
             .as_deref()
             .map(crate::fade::Fade::restore)
@@ -777,6 +823,7 @@ impl Startup<'_> {
             &mut images,
             &mut restored_random,
             &mut budget,
+            self.gate.selection().profile.is_inspected_20080719(),
         )?;
         // Records 0x8e8 follow 0x700 and bind to the objects just rebuilt.
         let movie_records: Vec<_> = snapshot
@@ -805,7 +852,7 @@ impl Startup<'_> {
         let mut buttons = self.buttons.clone();
         buttons.restore_with_layout(&records(0x8c0), &records(0x8c8), layout)?;
         let mut texts: [Option<_>; TEXT_OBJECTS] = snapshot.texts.clone();
-        if layout == SnapshotLayout::TextV1SceneV1 {
+        if layout.text_version() == 1 {
             for text in texts.iter_mut().flatten() {
                 text.logical_size = self.messages.screen_size().map(|v| v as i32);
             }
@@ -813,7 +860,7 @@ impl Startup<'_> {
         let mut history = self.history.clone();
         history.restore(&snapshot.raw_objects[&(0x540, 0)])?;
         let mut sequence = self.sequence.clone();
-        if layout == SnapshotLayout::TextV1SceneV1 {
+        if layout.text_version() == 1 {
             sequence = crate::sequence::SequenceHost::default();
         } else {
             sequence.restore(&snapshot.record_6e0)?;
@@ -853,6 +900,7 @@ impl Startup<'_> {
             mask,
             strip,
         );
+        self.scene.rain_effects = effects.rain_effects;
         self.scene.falling_effects = effects.falling_effects;
         self.scene.particle_effects = effects.particle_effects;
         self.scene.collision_effects = effects.collision_effects;
@@ -919,6 +967,41 @@ impl Startup<'_> {
             .state_mut()
             .set_system_integer(0, latest)
             .expect("slot 0 exists");
+        Ok(())
+    }
+
+    /// Old 0x22bc patches only the 256-byte comment field in the 600-byte header.
+    pub(super) fn handle_set_slot_comment(
+        &mut self,
+        request: &RuntimeCall,
+        slot: u32,
+        text: u32,
+    ) -> Result<(), Box<dyn Error>> {
+        let comment = self.machine.resolve_string(text)?;
+        if comment.len() >= 256 {
+            return Err(error(request.pc(), 0x22bc, "save comment exceeds native capacity").into());
+        }
+        let mut changed = false;
+        if slot <= 999
+            && let Some(mut bytes) = self.saves.read_slot(slot as u16)?
+            && bytes.len() >= HEADER_SIZE
+            && &bytes[..3] == b"CSV"
+            && (b'2'..=b'9').contains(&bytes[3])
+        {
+            bytes[272..272 + comment.len()].copy_from_slice(&comment);
+            bytes[272 + comment.len()] = 0;
+            replace_file(
+                &self.slot_directory()?,
+                &format!("save{slot:03}.dat"),
+                &bytes,
+            )?;
+            changed = true;
+        }
+        request.complete(&mut self.machine, 0x4008)?;
+        self.machine
+            .state_mut()
+            .set_system_integer(0, u32::from(changed))
+            .expect("slot zero exists");
         Ok(())
     }
 
@@ -1044,7 +1127,7 @@ fn replace_file(directory: &Path, name: &str, bytes: &[u8]) -> Result<(), Box<dy
     file.write_all(bytes)?;
     file.sync_all()?;
     drop(file);
-    if let Err(e) = fs::rename(&temporary, directory.join(name)) {
+    if let Err(e) = fs::replace(&temporary, directory.join(name)) {
         let _ = fs::remove_file(&temporary);
         return Err(e.into());
     }
@@ -1056,10 +1139,21 @@ mod layout_tests {
     use super::*;
 
     #[test]
+    fn unix_seconds_map_to_utc_civil_fields() {
+        assert_eq!(save_time_from_unix(0), [1970, 1, 1, 0, 0, 0]);
+        // Leap day and the last second of a century leap year.
+        assert_eq!(save_time_from_unix(951_782_400), [2000, 2, 29, 0, 0, 0]);
+        assert_eq!(save_time_from_unix(978_307_199), [2000, 12, 31, 23, 59, 59]);
+        assert_eq!(save_time_from_unix(1_793_912_645), [2026, 11, 5, 21, 4, 5]);
+    }
+
+    #[test]
     fn snapshot_layout_requires_an_independently_inspected_build() {
         let registry = crate::profile::Registry::builtin();
         for (id, layout) in [
             ("cmvs-20071117", SnapshotLayout::TextV1SceneV1),
+            ("cmvs-20080719", SnapshotLayout::TextV1SceneV2),
+            ("cmvs-20080903", SnapshotLayout::TextV1SceneV2),
             ("cmvs-20110525", SnapshotLayout::TextV2),
             ("cmvs-20120309", SnapshotLayout::TextV2),
             ("cmvs-20130131", SnapshotLayout::TextV2),
@@ -1077,7 +1171,9 @@ mod layout_tests {
                 effect_layout_supported(registry.profile(id).unwrap()),
                 matches!(
                     id,
-                    "cmvs-20110525"
+                    "cmvs-20080719"
+                        | "cmvs-20080903"
+                        | "cmvs-20110525"
                         | "cmvs-20120309"
                         | "cmvs-20171114"
                         | "cmvs-20211006"
@@ -1099,16 +1195,20 @@ mod layout_tests {
     fn restricted_effect_layout_only_accepts_the_inspected_type_five() {
         let registry = crate::profile::Registry::builtin();
         for id in [
+            "cmvs-20080719",
+            "cmvs-20080903",
             "cmvs-20110525",
             "cmvs-20120309",
             "cmvs-20211006",
             "cmvs-20221105",
         ] {
             let profile = registry.profile(id).unwrap();
-            for kind in [2, 5, 6, 8] {
+            for kind in [2, 4, 5, 6, 8] {
                 assert_eq!(
                     effect_record_supported(profile, &[1, 0, kind, 0]),
-                    kind == 5 || (id == "cmvs-20221105" && kind == 8)
+                    (id != "cmvs-20080903" && kind == 5)
+                        || (id == "cmvs-20221105" && kind == 8)
+                        || (id == "cmvs-20080903" && kind == 4)
                 );
             }
             assert!(!effect_record_supported(profile, &[1, 0]));
@@ -1117,6 +1217,8 @@ mod layout_tests {
         }
         for id in [
             "cmvs-20071117",
+            "cmvs-20080719",
+            "cmvs-20080903",
             "cmvs-20120309",
             "cmvs-20211006",
             "cmvs-20221105",

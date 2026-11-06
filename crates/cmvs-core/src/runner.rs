@@ -45,7 +45,9 @@ mod lifecycle;
 mod preferences;
 mod save;
 mod slot_edit;
-pub use save::{SaveTime, snapshot_layout_supported, thumbnail_bmp};
+pub use save::{
+    SaveTime, save_time_from_unix, snapshot_layout_supported, thumbnail_bmp, utc_save_time,
+};
 
 enum SystemOutput {
     New(NewSystemSave),
@@ -676,6 +678,7 @@ impl<'a> Startup<'a> {
             LoadSlot { slot } => self.handle_load_slot(&request, slot, backend)?,
             SaveSlot { slot } => self.handle_save_slot(&request, slot)?,
             EditSlots { first, second } => self.handle_edit_slots(&request, first, second)?,
+            SetSlotComment { slot, text } => self.handle_set_slot_comment(&request, slot, text)?,
             SetSlotInfo { slot, values } => self.handle_set_slot_info(&request, slot, values)?,
             Thumbnail => self.handle_thumbnail(&request)?,
             LatestSlot { start, count } => self.handle_latest_slot(&request, start, count)?,
@@ -989,7 +992,7 @@ impl<'a> Startup<'a> {
                 assets: &mut self.assets,
                 cursors: self.bootstrap.cursor_names(),
             });
-        } else if crate::dispatch::uses_device_frame(command) {
+        } else if crate::dispatch::uses_device_frame_for(resolved.semantics, command) {
             hosts.device_frame = Some(backend);
         }
         if is_movie_player {
@@ -1015,7 +1018,7 @@ impl<'a> Startup<'a> {
             });
         } else {
             hosts.camera = Some(&mut self.camera);
-            if crate::dispatch::uses_movie_scene(command) {
+            if crate::dispatch::uses_movie_scene_for(resolved.semantics, command) {
                 hosts.movie_scene = Some(crate::dispatch::MovieSceneHosts {
                     scene: &mut self.scene,
                     source: &mut scene_movie_source,

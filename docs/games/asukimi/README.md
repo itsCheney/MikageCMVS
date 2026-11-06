@@ -24,7 +24,9 @@
 
 ## 当前验证
 
-2026-11-02 完成只读基础登记：核对 PE 架构、image base、启动脚本及封包签名，并计算上表文件的 SHA-256。本次登记未启动原游戏或重实现引擎，也未进行 IDA 语义复核。
+800×600 画布、旧版快照 V1–V4、设置页及 LOAD 页评论 EDIT 确认/取消和读回已验证。完整绘制重放越过 snky06 旧停点至 1,200 万步预算，完整路线与原生存档界面仍待验证。
+
+下文按阶段保留研究记录；旧停点、无快照参数和当时的限制不代表当前状态。基础身份登记于 2026-11-02，后续接入与验证见各节。
 
 既有启动脚本结构普查见[引擎档案设计](../../design/engine-profiles.md#2-全系列普查2026-10-30)；历史普查不代表整包脚本、命令语义或完整游戏兼容。
 
@@ -92,12 +94,12 @@ S2 普查 126 个脚本，其中 `snsy13.ps2 / 0x2937a` 遇到空表达式。原
 - `probe-final-start`：修正 800×600 画布后，S1/R1/D1/I1/I2/I3/I4 再次通过，启动步数/帧数不变。`scenario-frame-800/frame.png` 抽查 `snky00.ps2 / 0x7232` 第 6 个消息等待，背景/气泡/文字位于 800×600 画布内；未作原版逐像素对照。
 - `desktop-readonly.log`：CPU 桌面窗口、无快照、原生音频启动 8 秒正常退出，9,243 步，保存的画面为 800×600。后端提交 `bgm35.ogg` 44.1kHz 双声道，未做听感或手动完整游玩。此前使用独立用户目录的运行在退出写 CSS1 时失败，故目前不给出可保存的启动承诺。
 
-本轮未开放老版快照/存读档，未完成路线、页面、影片及其他平台验证。用于只读预览的命令（不支持剧情存档）：
+当轮尚未开放旧版存读档；后续已接入，见下文旧版快照与设置记录。当前正常启动使用独立用户目录：
 
 默认 `cargo test --offline`、严格 Clippy、格式与差异检查通过；核心子槽布局及受影响的 profile/变体、场景、窗口、抓图和配置回归通过，桌面含原生音频的 release 构建通过。检查日志位于 `local/asukimi/`；未运行全 workspace 或其他平台检查。
 
 ```bash
-cargo run --offline --release --features desktop,audio-output --bin cmvs-desktop -- "<游戏目录>" --encoding shift-jis --font "<日文字体>" --audio native --continue-without-snapshot
+cargo run --offline --release --features desktop,audio-output --bin cmvs-desktop -- "<游戏目录>" --encoding shift-jis --font "<日文字体>" --audio native --user-data-dir "<独立用户目录>"
 ```
 
 ## 探针完成帧接入（2026-11-04）
@@ -191,3 +193,15 @@ cargo run --offline --release --features desktop,audio-output --bin cmvs-desktop
 ```bash
 cargo run --offline --release --features desktop,audio-output --bin cmvs-desktop -- "<游戏目录>" --encoding shift-jis --user-data-dir "local/asukimi/play" --font "<日文字体>" --audio native
 ```
+
+
+### 0x213c / 0x22bc：存档评论 EDIT（2026-11-05）
+
+同一已绑定 x86 哈希独立核对：`0x213c → 0x44e09b → 0x44d890 → 0x44cbf0`；确认路径 `0x45fb90 → 0x403c30`。评论写入 `0x22bc → 0x44a370`。前者读取标题、提示、初始文字、ANSI 字节限制、输出字符串引用及第六标志（旧 helper 不使用该标志），返回 `0x4018`；确认返回系统结果 1，取消返回 0，保留初始评论。确认先过滤半角字符，过滤后为空也回退初始文字。后者仅修改 CSV2–CSV9 的 600 字节头中偏移 272 的评论字符串，返回 `0x4008` 和写入结果，保留其余头字段及全部载荷。两入口只经哈希绑定的 `text-dialog` 研究变体开放，仍为 Unreviewed；只读证据见 `local/asukimi/text-dialog-evidence.json`。
+
+平台层新增显式文字对话框请求、Pending/取消/确认结果和记录后端；Windows 桌面接入带输入框的模态对话框，按脚本字节限制提供全角字符容量。回归覆盖两构建的确认、取消、空输入回退、半角过滤、无效结果不消耗参数，以及缺失/损坏/越界存档和修改评论保留载荷；分派 10 项、profile 16 项、评论 runner 用例通过。core/desktop/native all-targets 严格 Clippy、格式与差异检查通过，含原生音频的 release 桌面已构建。未操作原生窗口或验证输入法交互，其他平台的文字对话框仍显式不支持。
+
+真实逐帧绘制重放 `local/asukimi/menu-edit-load-verified/` 先通过槽 API 建立开头存档，再从工具栏 LOAD 页点击 EDIT，确认写入全角「あい」、再次取消后保持评论，选择存档并确认返回 `snky00.ps2`。本次未验证该作工具栏 SAVE 的完整流程。
+
+
+后续已补齐 Linux Zenity 与 macOS osascript 评论输入框，复用相同请求和确认/取消结果；两端在确认时按 Unicode 字符边界限制长度，再交由核心执行游戏编码校验及全角过滤。平台服务协议、Linux 参数及 macOS 取消/错误分支已在 Windows 主机测试，未认领 Linux/macOS 原生窗口或构建通过；依赖和运行范围见[运行指南](../../guides/running.md#存档评论编辑框)。

@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/cmvs-core", "crates/cmvs-input", "crates/cmvs-font", "crates/cmvs-audio", "crates/cmvs-desktop", "crates/cmvs-native", "crates/cmvs-wgpu", "crates/cmvs-probe", "platforms/android/native", "platforms/web/native", "crates/cmvs-mobile"]
+members = ["crates/cmvs-core", "crates/cmvs-input", "crates/cmvs-font", "crates/cmvs-audio", "crates/cmvs-desktop", "crates/cmvs-native", "crates/cmvs-wgpu", "crates/cmvs-probe", "platforms/android/native", "platforms/web/native", "platforms/switch/player", "crates/cmvs-mobile"]
 default-members = ["."]
 resolver = "3"
 

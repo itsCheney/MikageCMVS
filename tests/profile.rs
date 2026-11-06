@@ -911,6 +911,18 @@ fn embedded_profiles_parse_and_bind_the_recorded_games() {
     assert_eq!(asukimi.statuses().len(), 864);
     assert_eq!(asukimi.count(CommandStatus::Unreviewed), 519);
     assert_eq!(asukimi.count(CommandStatus::NoOp), 345);
+    let asunana = registry.profile("cmvs-20080903").unwrap();
+    assert_eq!(asunana.base.as_deref(), Some("cmvs-20160201"));
+    assert_eq!(asunana.binaries.len(), 1);
+    assert_eq!(asunana.statuses().len(), 864);
+    assert_eq!(asunana.status(0x1d), CommandStatus::NoOp);
+    let harouse = registry.profile("cmvs-20080719").unwrap();
+    assert_eq!(harouse.base.as_deref(), Some("cmvs-20160201"));
+    assert_eq!(harouse.binaries.len(), 1);
+    assert_eq!(harouse.statuses().len(), 864);
+    assert_eq!(harouse.count(CommandStatus::Unreviewed), 539);
+    assert_eq!(harouse.count(CommandStatus::NoOp), 325);
+    assert_eq!(harouse.status(0x1d), CommandStatus::NoOp);
     let hapymaher = registry.profile("cmvs-20130131").unwrap();
     let hapymaherfd = registry.profile("cmvs-20140217").unwrap();
     assert_eq!(hapymaherfd.base.as_deref(), Some("cmvs-20160201"));
@@ -959,6 +971,8 @@ fn embedded_profiles_parse_and_bind_the_recorded_games() {
         games,
         [
             ("asukimi", "cmvs-20071117", None),
+            ("harouse", "cmvs-20080719", None),
+            ("asunana", "cmvs-20080903", None),
             ("miranosu", "cmvs-20110525", None),
             ("kazokubu", "cmvs-20120309", None),
             ("hapymaher", "cmvs-20130131", None),
@@ -969,9 +983,20 @@ fn embedded_profiles_parse_and_bind_the_recorded_games() {
             ("realive", "cmvs-20190305", None),
             ("seishunf", "cmvs-20190405", None),
             ("kunado", "cmvs-20211006", None),
-            ("hapymaher_re", "cmvs-20221105", None)
+            ("hapymaher_re", "cmvs-20221105", None),
+            ("hapymaherfd_re", "cmvs-20221105", None)
         ]
     );
+    let remakes: Vec<_> = registry
+        .games()
+        .iter()
+        .filter(|game| game.profile == "cmvs-20221105")
+        .collect();
+    assert_eq!(remakes[0].game_id, 0x1760_0013);
+    assert_eq!(remakes[1].game_id, 0x1760_0015);
+    assert_ne!(remakes[0].start_script, remakes[1].start_script);
+    assert_ne!(remakes[0].script_archive, remakes[1].script_archive);
+    assert_eq!(remakes[0].executables, remakes[1].executables);
 }
 
 #[test]

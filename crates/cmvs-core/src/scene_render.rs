@@ -8,6 +8,8 @@ use crate::{
     scene::{DrawState, MaskTransition, ObjectImage, SceneHost, SceneObject},
 };
 
+pub mod shader;
+
 pub enum Layer<'a> {
     /// World-space inverse-view billboard: full texture, wrapped linear sampling,
     /// alpha blending and no depth writes (original queue 5).
@@ -177,6 +179,16 @@ fn check(words: &[u32; 22], projected: bool) -> Result<(), FormatError> {
     Ok(())
 }
 
+/// Harouse x86 0x411120's jump table sends both modes 0 and 1 to 0x411142.
+/// Keep the stored mode for child matching; normalize only the validation copy.
+fn check_screen(words: &[u32; 22], allow_mode_one: bool) -> Result<(), FormatError> {
+    let mut checked = *words;
+    if allow_mode_one && checked[0] == 1 {
+        checked[0] = 0;
+    }
+    check(&checked, false)
+}
+
 /// Order key as inserted by 0x14003ddd0: the layer word as i32, converted to f32.
 fn order(words: &[u32; 22]) -> f32 {
     words[10] as i32 as f32
@@ -313,6 +325,24 @@ fn rotated_local(
         .map(|[x, y]| [hundredths(sin * y + cos * x), hundredths(cos * y - x * sin)])
 }
 
+/// HAROUSE 0x413a10 -> 0x4126c0: rotate projected, scaled child corners
+/// around the parent's origin, before adding the projected position. x87 keeps
+/// products in extended precision until integer truncation; f64 approximates it.
+fn projected_parent_rotation([x, y]: [f32; 2], degrees: f32) -> [f32; 2] {
+    let theta = ((360.0 - f64::from(degrees)) * f64::from(0.017_453_292f32)) as f32;
+    let (sin, cos) = (f64::from(theta).sin() as f32, f64::from(theta).cos() as f32);
+    let (sin, cos, x, y) = (f64::from(sin), f64::from(cos), f64::from(x), f64::from(y));
+    [sin * y + cos * x, cos * y - x * sin].map(|v| {
+        let value = v * 100.0;
+        let integer = if !(-2_147_483_648.0..2_147_483_648.0).contains(&value) {
+            i32::MIN
+        } else {
+            value as i32
+        };
+        (f64::from(integer) / 100.0) as f32
+    })
+}
+
 /// KUNADO 0x140061130 -> 0x140036200: roll is truncated to signed hundredths,
 /// reduced modulo 36000, and applied only when positive. Round screen coordinates
 /// before rotating about half the camera's screen size, then truncate to hundredths.
@@ -444,7 +474,8 @@ fn unit_screen_scale(object: &SceneObject, screen: [u32; 2]) -> Result<(), Forma
 /// and scale (0x1400238a0, device factor 1 on the 1280x720 viewport) minus the device's
 /// half-pixel offset. The object's own angle rotates its local corners before projection
 /// scaling. Inherited attached children reuse the parent projection and origin; masks,
-/// rotated parents of children and effect targets are not verified. Camera roll follows
+/// effect targets are not verified. Parent rotation is enabled only for the inspected
+/// HAROUSE build. Camera roll follows
 /// KUNADO 0x140061130/0x140036200; +52 also shifts projection horizontally, while
 /// +48 and the copied +52 angle are unused by that vertex transform.
 fn projected_layer<'a>(
@@ -559,13 +590,14 @@ fn projected_layer<'a>(
     // 0x140024020 rotates the scaled local corners by the object's own angle; 0x1400238a0
     // then subtracts the offset, applies the projection scale, rotates by its +52 argument
     // (the parent's angle for an inherited child, 0 otherwise) and adds the position.
-    if inherited.is_some_and(|p| p[20] != 0) {
+    let parent_angle = inherited.map_or(0, |p| p[20] as i32);
+    if parent_angle != 0 && !scene.allow_projected_parent_rotation {
         return Err(FormatError(
             "children of a rotated projected parent are not verified",
         ));
     }
     let degrees = words[20] as i32 as f32 / 100.0;
-    if degrees != 0.0 || camera_roll > 0 {
+    if degrees != 0.0 || parent_angle != 0 || camera_roll > 0 {
         let corners = if degrees != 0.0 {
             let origin = [words[6] as i16, words[7] as i16].map(i64::from);
             rotated_local(local, origin, [w, h], degrees)
@@ -578,7 +610,18 @@ fn projected_layer<'a>(
             ]
             .map(|c| [0, 1].map(|i| (c[i] + origin[i]) * local[i]))
         };
-        let corners = corners.map(|c| [0, 1].map(|i| (c[i] - offset[i]) * scale[i] + [px, py][i]));
+        let corners = corners.map(|c| [0, 1].map(|i| (c[i] - offset[i]) * scale[i]));
+        if !corners.as_flattened().iter().all(|v| v.is_finite()) {
+            return Err(FormatError("projected object has a non-finite extent"));
+        }
+        let corners = corners.map(|point| {
+            let point = if parent_angle != 0 {
+                projected_parent_rotation(point, (f64::from(parent_angle) / 100.0) as f32)
+            } else {
+                point
+            };
+            [point[0] + px, point[1] + py]
+        });
         if !corners.as_flattened().iter().all(|v| v.is_finite()) {
             return Err(FormatError("projected object has a non-finite extent"));
         }
@@ -842,6 +885,18 @@ pub fn prepare_scene<'a>(
                         )
                     }),
             )
+            .chain(
+                scene
+                    .rain_effects
+                    .get(&slot)
+                    .into_iter()
+                    .flat_map(|effect| {
+                        effect
+                            .particles
+                            .iter()
+                            .map(|p| (None, &p.object, Some(&effect.pool)))
+                    }),
+            )
     });
     let all_objects = slots
         .map(|(slot, object)| (slot, object, None, false))
@@ -937,7 +992,7 @@ pub fn prepare_scene<'a>(
             }
             _ => {}
         }
-        check(d, false)?;
+        check_screen(d, scene.allow_screen_coordinates_one)?;
         let position = [d[8] as i32, d[9] as i32].map(i64::from);
         let mask = slot.and_then(|slot| scene.mask_on(slot));
         let layer = match object
@@ -986,7 +1041,7 @@ pub fn prepare_scene<'a>(
                     continue;
                 }
                 unit_screen_scale(child, scene.screen_size())?;
-                check(words, false)?;
+                check_screen(words, scene.allow_screen_coordinates_one)?;
                 let Some(layer) = child_layer(object, d, child, words)? else {
                     continue;
                 };
@@ -1585,6 +1640,87 @@ mod scale_tests {
             pixels: RgbaImage::new(2, 2, [255, 0, 0, 255].repeat(4)).unwrap(),
             surface: false,
         }
+    }
+
+    #[test]
+    fn inspected_screen_mode_one_draws_parent_and_inherited_children_after_restore() {
+        let mut draw = DrawState::default();
+        draw.words[0] = 1;
+        draw.words[4..6].fill(1);
+        draw.words[8] = 1;
+        let mut child_draw = draw.clone();
+        child_draw.words[17] = 128;
+        let child = SceneObject {
+            flags: 3,
+            draw: Some(child_draw.clone()),
+            ..Default::default()
+        };
+        // A child with another coordinate mode does not join this parent's queue.
+        child_draw.words[0] = 0;
+        child_draw.words[8] = 0;
+        let different_mode = SceneObject {
+            flags: 3,
+            draw: Some(child_draw),
+            ..Default::default()
+        };
+        let parent = SceneObject {
+            flags: 0x8000_0000,
+            image: Some(image()),
+            draw: Some(draw),
+            children: std::collections::BTreeMap::from([(0, child), (1, different_mode)]),
+            ..Default::default()
+        };
+        let profile = crate::profile::Registry::builtin()
+            .profile("cmvs-20080719")
+            .unwrap();
+        let mut scene = SceneHost::for_profile(profile);
+        scene.restore(
+            Default::default(),
+            std::collections::BTreeMap::from([(10, parent.clone())]),
+            None,
+            None,
+            None,
+            None,
+        );
+        let frame = render(&scene, 4, 1).unwrap();
+        let rgb: Vec<_> = frame
+            .pixels()
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|p| p[..3].to_vec())
+            .collect();
+        assert_eq!(rgb, [[0, 0, 0], [255, 0, 0], [128, 0, 0], [0, 0, 0]]);
+        assert_eq!(scene.object(10).unwrap().draw.as_ref().unwrap().words[0], 1);
+        for change in 0..3 {
+            let mut unknown = profile.clone();
+            match change {
+                0 => unknown.id = "uninspected".into(),
+                1 => unknown.binaries[0].sha256 = [0; 32],
+                _ => unknown.base = Some("uninspected".into()),
+            }
+            let mut scene = SceneHost::for_profile(&unknown);
+            scene.restore(
+                Default::default(),
+                std::collections::BTreeMap::from([(10, parent.clone())]),
+                None,
+                None,
+                None,
+                None,
+            );
+            assert!(render(&scene, 4, 1).is_err());
+        }
+        let mut invalid = parent;
+        invalid.draw.as_mut().unwrap().words[1] = 3;
+        scene.restore(
+            Default::default(),
+            std::collections::BTreeMap::from([(10, invalid)]),
+            None,
+            None,
+            None,
+            None,
+        );
+        assert!(render(&scene, 4, 1).is_err());
     }
 
     #[test]

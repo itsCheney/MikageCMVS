@@ -1,4 +1,5 @@
-//! Optional Rust Vorbis streaming and native output. Engine state stays in `audio`.
+//! Optional Rust Vorbis streaming, mixing and native output. Engine state stays in `audio`.
+//! With only the `mixer` feature the host pulls mixed PCM through [`PcmOutput`].
 use crate::VorbisProgram;
 use cmvs_core::{
     MAX_PAYLOAD,
@@ -9,9 +10,12 @@ use cmvs_core::{
     platform::resolve_under,
     resources::{ResourceArchives, ResourceKind, ResourceSource},
 };
-#[cfg(feature = "device")]
+#[cfg(feature = "native")]
 use rodio::{DeviceSinkBuilder, MixerDeviceSink};
-use rodio::{Player, Source, mixer::Mixer};
+use rodio::{
+    Player, Source,
+    mixer::{Mixer, MixerSource},
+};
 use std::{
     collections::BTreeMap,
     error::Error,
@@ -164,6 +168,7 @@ struct Channel {
     looped: Arc<AtomicBool>,
     gain: f32,
     duck_gain: f32,
+    script_gain: f32,
 }
 impl Channel {
     fn check(&self) -> Result<(), Box<dyn Error>> {
@@ -201,7 +206,7 @@ fn preloaded_gain(volume: u32) -> Option<f32> {
         .then(|| 10f32.powf(db as f32 / 2000.0))
 }
 
-/// Native output shared by desktop and Android hosts.
+/// Engine audio channels shared by desktop, Android and pull-output hosts.
 pub struct NativeAudio {
     preloaded: [Option<Channel>; cmvs_core::audio::PRELOADED_SOUNDS],
     output_enabled: Arc<AtomicBool>,
@@ -220,26 +225,30 @@ pub struct NativeAudio {
     last_movie_report_ms: u32,
     voice_ducking: VoiceDucking,
     ducking_clock: Instant,
+    mixer: Mixer,
     // Channels must drop before the device stream.
-    output: Output,
+    #[cfg(feature = "native")]
+    _device: Option<MixerDeviceSink>,
 }
-/// Where the channels mix to: the default device, or a mixer the host pulls from.
-enum Output {
-    #[cfg(feature = "device")]
-    Device(MixerDeviceSink),
-    Mixer(Mixer),
-}
-impl Output {
-    fn mixer(&self) -> &Mixer {
-        match self {
-            #[cfg(feature = "device")]
-            Self::Device(stream) => stream.mixer(),
-            Self::Mixer(mixer) => mixer,
+
+/// Host side of a pull-mode mixer: interleaved samples at the requested rate and
+/// channel count. Pull it from one thread; the engine backend may live elsewhere.
+pub struct PcmOutput(MixerSource);
+impl PcmOutput {
+    /// Fills `out` completely. Gaps without any active channel are silence, so a
+    /// device that keeps running never underflows because the game is quiet.
+    pub fn fill_i16(&mut self, out: &mut [i16]) {
+        for sample in out {
+            *sample = self
+                .0
+                .next()
+                .map_or(0, |x| (x * 32768.0).clamp(-32768.0, 32767.0) as i16);
         }
     }
 }
 impl NativeAudio {
-    #[cfg(feature = "device")]
+    /// Plays through the default system output device.
+    #[cfg(feature = "native")]
     pub fn new(root: &Path) -> Result<Self, Box<dyn Error>> {
         let fault: Fault = Arc::default();
         let copy = fault.clone();
@@ -254,14 +263,32 @@ impl NativeAudio {
             stream.config().sample_rate(),
             stream.config().channel_count()
         );
-        Self::with_output(root, Output::Device(stream), fault)
+        let mut audio = Self::with_mixer(root, stream.mixer().clone(), fault)?;
+        audio._device = Some(stream);
+        Ok(audio)
     }
-    /// Mix into `mixer` instead of a device: the host pulls the samples from the
-    /// mixer's source (for example from a real-time audio callback of its own).
-    pub fn with_mixer(root: &Path, mixer: Mixer) -> Result<Self, Box<dyn Error>> {
-        Self::with_output(root, Output::Mixer(mixer), Arc::default())
+    /// Mixes into a host-pulled stream instead of a system device, for platforms the
+    /// device layer does not support. `rate` and `channels` describe the host output.
+    pub fn pull(
+        root: &Path,
+        rate: u32,
+        channels: u16,
+    ) -> Result<(Self, PcmOutput), Box<dyn Error>> {
+        let (mixer, source) = rodio::mixer::mixer(
+            rodio::ChannelCount::new(channels).ok_or("output channel count is zero")?,
+            rodio::SampleRate::new(rate).ok_or("output sample rate is zero")?,
+        );
+        Ok((
+            Self::with_mixer(root, mixer, Arc::default())?,
+            PcmOutput(source),
+        ))
     }
-    fn with_output(root: &Path, output: Output, fault: Fault) -> Result<Self, Box<dyn Error>> {
+    /// Mikage: mixes into a rodio mixer the host already holds and pulls from in
+    /// its own format (cmvs-mobile renders f32 from the mixer's source).
+    pub fn from_mixer(root: &Path, mixer: Mixer) -> Result<Self, Box<dyn Error>> {
+        Self::with_mixer(root, mixer, Arc::default())
+    }
+    fn with_mixer(root: &Path, mixer: Mixer, fault: Fault) -> Result<Self, Box<dyn Error>> {
         Ok(Self {
             preloaded: std::array::from_fn(|_| None),
             output_enabled: Arc::new(AtomicBool::new(true)),
@@ -280,7 +307,9 @@ impl NativeAudio {
             last_movie_report_ms: 0,
             voice_ducking: VoiceDucking::default(),
             ducking_clock: Instant::now(),
-            output,
+            mixer,
+            #[cfg(feature = "native")]
+            _device: None,
         })
     }
     pub fn host_control(&self) -> HostAudioControl {
@@ -328,7 +357,9 @@ impl NativeAudio {
     ) -> Channel {
         let fault: Fault = Arc::default();
         let looped = program.looped.clone();
-        let sink = Player::connect_new(self.output.mixer());
+        // Queue the stream before connecting: the mixer fixes its resampler from the
+        // player's reported format, and an empty player reports a placeholder rate.
+        let (sink, queue) = Player::new();
         sink.pause();
         let gain = volume.min(256) as f32 / 256.0;
         let envelope = (fade_ms != 0).then(|| Envelope::new(0.0, 1.0, fade_ms));
@@ -342,6 +373,7 @@ impl NativeAudio {
             fault: fault.clone(),
             failed: false,
         });
+        self.mixer.add(queue);
         Channel {
             bytes,
             sink,
@@ -351,6 +383,7 @@ impl NativeAudio {
             looped,
             gain,
             duck_gain: 1.0,
+            script_gain: 1.0,
         }
     }
     fn fade(channel: &mut Option<Channel>, ms: u32) {
@@ -364,7 +397,9 @@ impl NativeAudio {
     }
     fn set_gain(channel: &mut Channel, gain: f32) {
         channel.sink.set_volume(
-            gain * channel.duck_gain * channel.envelope.as_ref().map_or(1.0, Envelope::value),
+            gain * channel.duck_gain
+                * channel.script_gain
+                * channel.envelope.as_ref().map_or(1.0, Envelope::value),
         );
         channel.gain = gain;
     }
@@ -391,7 +426,7 @@ impl NativeAudio {
         if let Some(fade) = current.envelope {
             current
                 .sink
-                .set_volume(current.gain * current.duck_gain * fade.value());
+                .set_volume(current.gain * current.duck_gain * current.script_gain * fade.value());
             if fade.finished() {
                 if current.release_at_end {
                     *channel = None;
@@ -404,6 +439,17 @@ impl NativeAudio {
     }
 }
 impl AudioBackend for NativeAudio {
+    fn set_se_gain(&mut self, channel: u8, multiplier: u32) -> Result<(), Box<dyn Error>> {
+        let slot = self
+            .se
+            .get_mut(usize::from(channel))
+            .ok_or("SE channel out of range")?;
+        if let Some(sound) = slot {
+            sound.script_gain = multiplier as f32 / 256.0;
+            Self::set_gain(sound, sound.gain);
+        }
+        Ok(())
+    }
     fn preload(&mut self, slot: u8, name: &[u8]) -> Result<bool, Box<dyn Error>> {
         let index = usize::from(slot);
         if index >= self.preloaded.len() {
@@ -609,7 +655,9 @@ impl AudioBackend for NativeAudio {
             return Ok(());
         };
         let program = VorbisProgram::from_shared(current.bytes.clone(), looped)?;
-        let candidate = self.prepare(program, (current.gain * 256.0) as u32, 0);
+        let mut candidate = self.prepare(program, (current.gain * 256.0) as u32, 0);
+        candidate.script_gain = current.script_gain;
+        Self::set_gain(&mut candidate, current.gain);
         // All fallible preparation precedes replacing the old device channel.
         self.se[slot] = Some(candidate);
         self.se[slot].as_ref().unwrap().sink.play();
@@ -880,6 +928,33 @@ impl AudioBackend for NativeAudio {
 #[cfg(test)]
 mod output_gate_tests {
     use super::*;
+
+    #[test]
+    fn pull_output_resamples_channels_and_pads_with_silence() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/audio");
+        let bytes = std::fs::read(root.join("mono440.ogg")).unwrap();
+        let (audio, mut output) = NativeAudio::pull(&root, 48_000, 2).unwrap();
+        let mut silence = [1i16; 64];
+        output.fill_i16(&mut silence);
+        assert!(silence.iter().all(|&x| x == 0));
+
+        let mut reference = VorbisProgram::new(bytes.clone(), None, false).unwrap();
+        let mut frames = 0u64;
+        while reference.next_sample().unwrap().is_some() {
+            frames += 1;
+        }
+        let expected = frames * 48_000 / u64::from(reference.sample_rate());
+        let channel = audio.prepare(VorbisProgram::new(bytes, None, false).unwrap(), 256, 0);
+        channel.sink.play();
+        let mut pcm = vec![0i16; (expected as usize + 4800) * 2];
+        output.fill_i16(&mut pcm);
+        // Mono input is duplicated to both output channels.
+        assert!(pcm.chunks(2).all(|frame| frame[0] == frame[1]));
+        let audible = pcm.chunks(2).rposition(|f| f[0] != 0).unwrap() as u64 + 1;
+        assert!(audible.abs_diff(expected) < 480, "{audible} vs {expected}");
+        assert!(pcm[pcm.len() - 2000..].iter().all(|&x| x == 0));
+        assert!(channel.sink.empty());
+    }
 
     #[test]
     fn preloaded_volume_uses_directsound_logarithmic_gain_and_rejects_positive_db() {

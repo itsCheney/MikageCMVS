@@ -340,7 +340,11 @@ pub struct SceneHost {
     child_slots: ChildSlots,
     allow_filter_mode_one: bool,
     allow_legacy_sine_modes: bool,
+    pub(crate) allow_screen_coordinates_one: bool,
+    pub(crate) allow_projected_parent_rotation: bool,
+    pub(crate) allow_triangle_quake: bool,
     screen_size: crate::viewport::ScreenSize,
+    pub(crate) rain_effects: BTreeMap<u8, crate::effect_objects::RainEffect>,
     pub(crate) fragment_effects: BTreeMap<u8, crate::effect_objects::FragmentEffect>,
     pub(crate) collision_effects: BTreeMap<u8, crate::effect_objects::CollisionEffect>,
     pub(crate) particle_effects: BTreeMap<u8, crate::effect_objects::ParticleEffect>,
@@ -361,7 +365,11 @@ impl SceneHost {
         Self {
             child_slots: ChildSlots::for_profile(profile),
             allow_filter_mode_one: profile.is_inspected_20071117(),
-            allow_legacy_sine_modes: profile.is_inspected_20071117(),
+            allow_legacy_sine_modes: profile.uses_legacy_sine_modes(),
+            allow_screen_coordinates_one: profile.is_inspected_20080719()
+                || profile.is_inspected_20080903(),
+            allow_projected_parent_rotation: profile.is_inspected_20080719(),
+            allow_triangle_quake: profile.is_inspected_20080719(),
             ..Self::default()
         }
     }
@@ -781,6 +789,37 @@ impl SceneHost {
         Ok(())
     }
 
+    /// HAROUSE x86 0x444ce0: select screen coordinate mode 0 or 1.
+    pub(crate) fn screen_coordinates(
+        &mut self,
+        call: &mut Call<'_, '_>,
+    ) -> Result<(), DecodeError> {
+        let pc = call.pc;
+        let fail = |why| error(pc, 0x204e, why);
+        let slot = call.argument(4, "object slot")?;
+        let child = call.argument(8, "child slot")? as i32;
+        let mode = call.argument(12, "mode")?;
+        let parent = u8::try_from(slot)
+            .ok()
+            .and_then(|slot| self.objects.get_mut(&slot))
+            .ok_or_else(|| fail("object slot does not exist"))?;
+        let object = if child < 0 {
+            parent
+        } else {
+            u8::try_from(child)
+                .ok()
+                .and_then(|child| parent.children.get_mut(&u16::from(child)))
+                .ok_or_else(|| fail("child object does not exist in slots 0..255"))?
+        };
+        let draw = object
+            .draw
+            .as_mut()
+            .ok_or_else(|| fail("object has no draw state"))?;
+        call.complete(0x400c)?;
+        draw.words[0] = u32::from(mode != 0);
+        Ok(())
+    }
+
     fn handle_object(&mut self, call: &mut Call<'_, '_>) -> Result<(), DecodeError> {
         let (pc, command) = (call.pc, call.command);
         let fail = |why| error(pc, command + 0x2000, why);
@@ -1172,6 +1211,10 @@ impl SceneHost {
             child_slots: self.child_slots,
             allow_filter_mode_one: self.allow_filter_mode_one,
             allow_legacy_sine_modes: self.allow_legacy_sine_modes,
+            allow_screen_coordinates_one: self.allow_screen_coordinates_one,
+            allow_projected_parent_rotation: self.allow_projected_parent_rotation,
+            allow_triangle_quake: self.allow_triangle_quake,
+            rain_effects: Default::default(),
             particle_effects: Default::default(),
             falling_effects: Default::default(),
             collision_effects: Default::default(),

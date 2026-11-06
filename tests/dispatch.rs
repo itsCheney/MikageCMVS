@@ -9,6 +9,117 @@ mod support;
 use support::bytecode::{command, pending, script};
 
 #[test]
+fn screen_coordinates_change_only_the_selected_draw_mode() {
+    use cmvs_rs::{profile::Semantics, scene::SceneHost};
+    let profile = Registry::builtin().profile("cmvs-20080719").unwrap();
+    for child in [u32::MAX, 255] {
+        for mode in [0, 1, 2, u32::MAX] {
+            let mut code = vec![];
+            for (op, args) in [
+                (0x2020, vec![20]),
+                (0x2022, vec![20, 255]),
+                (0x2040, vec![20]),
+                (0x2050, vec![20, 255]),
+                (0x2045, vec![20, child, 37, 81]),
+                (0x204e, vec![20, child, mode]),
+            ] {
+                command(&mut code, op, &args);
+            }
+            let program = script(&code);
+            let mut vm = Machine::new(&program).unwrap();
+            let mut scene = SceneHost::for_profile(profile);
+            for _ in 0..5 {
+                pending(&mut vm);
+                dispatch::run(
+                    Semantics::Root,
+                    &mut vm,
+                    &mut Hosts {
+                        scene: Some(&mut scene),
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+            }
+            let mut expected = scene.object(20).unwrap().clone();
+            let object = if child == u32::MAX {
+                &mut expected
+            } else {
+                expected.children.get_mut(&255).unwrap()
+            };
+            object.draw.as_mut().unwrap().words[0] = u32::from(mode != 0);
+            pending(&mut vm);
+            // The root has no implementation of this entry; only the hash-bound override runs.
+            assert_eq!(
+                dispatch::run(Semantics::Root, &mut vm, &mut Hosts::default()).unwrap(),
+                None
+            );
+            assert_eq!(
+                dispatch::run(
+                    profile.semantics(0x4e),
+                    &mut vm,
+                    &mut Hosts {
+                        scene: Some(&mut scene),
+                        ..Default::default()
+                    }
+                )
+                .unwrap(),
+                Some(Flow::Done)
+            );
+            assert_eq!(scene.object(20), Some(&expected));
+            assert_eq!(vm.stack().len_bytes(), 0);
+        }
+    }
+}
+
+#[test]
+fn screen_coordinates_reject_invalid_targets_without_consuming_arguments() {
+    use cmvs_rs::{profile::Semantics, scene::SceneHost};
+    let profile = Registry::builtin().profile("cmvs-20080719").unwrap();
+    for args in [
+        vec![20, u32::MAX, 1],
+        vec![20, 256, 1],
+        vec![21, u32::MAX, 1],
+        vec![256, u32::MAX, 1],
+        vec![20, 0, 1],
+        vec![20, u32::MAX],
+        vec![],
+    ] {
+        let mut code = vec![];
+        command(&mut code, 0x2020, &[20]);
+        command(&mut code, 0x204e, &args);
+        let program = script(&code);
+        let mut vm = Machine::new(&program).unwrap();
+        let mut scene = SceneHost::for_profile(profile);
+        pending(&mut vm);
+        dispatch::run(
+            Semantics::Root,
+            &mut vm,
+            &mut Hosts {
+                scene: Some(&mut scene),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        pending(&mut vm);
+        let before = scene.objects().clone();
+        assert!(
+            dispatch::run(
+                profile.semantics(0x4e),
+                &mut vm,
+                &mut Hosts {
+                    scene: Some(&mut scene),
+                    ..Default::default()
+                }
+            )
+            .is_err()
+        );
+        assert_eq!(scene.objects(), &before);
+        assert_eq!(vm.stack().len_bytes(), args.len() * 4);
+        assert_eq!(vm.pending_system().map(|p| p.1), Some(0x4e));
+    }
+}
+
+#[test]
 fn migrated_tables_have_unique_owners_and_overrides_are_build_bound() {
     for table in std::iter::once(dispatch::ROOT).chain(dispatch::VARIANT_TABLES.iter().copied()) {
         let owners: std::collections::BTreeSet<_> = table.iter().map(|e| e.command).collect();
@@ -274,5 +385,129 @@ fn shared_flag_queries_discard_unknown_value_words_without_reading_them() {
         assert_eq!(vm.stack().len_bytes(), 4);
         assert_eq!(vm.state().system_integer(0), Some(0));
         assert_eq!(flags, MessageFlags::default());
+    }
+}
+
+#[test]
+fn old_text_dialog_commits_accept_cancel_and_empty_results() {
+    use cmvs_rs::platform::RecordingBackend;
+    for name in ["cmvs-20071117", "cmvs-20080719", "cmvs-20080903"] {
+        let profile = Registry::builtin().profile(name).unwrap();
+        for (answer, result, text) in [
+            (Some(b"A\x82\xa0x".to_vec()), 1, b"\x82\xa0".as_slice()),
+            (None, 0, b"old comment".as_slice()),
+            (Some(vec![]), 1, b"old comment".as_slice()),
+        ] {
+            let mut code = vec![];
+            command(
+                &mut code,
+                0x213c,
+                &[0x80000000, 0x80000001, 0x80000002, 32, 0x80000003, 1],
+            );
+            let program = script(&code);
+            let mut vm = Machine::new(&program).unwrap();
+            for (i, value) in [b"Title".as_slice(), b"Prompt", b"old comment", b"before"]
+                .iter()
+                .enumerate()
+            {
+                vm.state_mut().set_string(i as u32, value).unwrap();
+            }
+            pending(&mut vm);
+            let mut backend = RecordingBackend::default();
+            backend.answer_text_dialog(answer);
+            let mut hosts = Hosts {
+                device_frame: Some(&mut backend),
+                ..Default::default()
+            };
+            assert_eq!(
+                dispatch::run(profile.semantics(0x13c), &mut vm, &mut hosts).unwrap(),
+                Some(Flow::Done)
+            );
+            assert_eq!(vm.state().system_integer(0), Some(result));
+            assert_eq!(vm.state().string(3), Some(text));
+            assert_eq!(vm.stack().len_bytes(), 0);
+            assert!(vm.pending_system().is_none());
+            assert_eq!(backend.text_dialogs()[0].initial, b"old comment");
+            assert_eq!(backend.text_dialogs()[0].max_bytes, 32);
+        }
+    }
+}
+
+#[test]
+fn old_text_dialog_waits_and_rejects_invalid_results_atomically() {
+    use cmvs_rs::platform::{
+        PlatformBackend, PlatformRequest, RecordingBackend, TextDialogRequest, TextDialogResult,
+    };
+    struct Pending;
+    impl PlatformBackend for Pending {
+        fn apply(&mut self, _: &PlatformRequest) -> Result<(), Box<dyn std::error::Error>> {
+            unreachable!()
+        }
+        fn poll_text_dialog(
+            &mut self,
+            _: &TextDialogRequest,
+        ) -> Result<TextDialogResult, Box<dyn std::error::Error>> {
+            Ok(TextDialogResult::Pending)
+        }
+    }
+    let profile = Registry::builtin().profile("cmvs-20080719").unwrap();
+    let mut code = vec![];
+    command(
+        &mut code,
+        0x213c,
+        &[0x80000000, 0x80000000, 0x80000000, 32, 0x80000000, 0],
+    );
+    let program = script(&code);
+    let mut vm = Machine::new(&program).unwrap();
+    vm.state_mut().set_string(0, b"unchanged").unwrap();
+    vm.state_mut().set_system_integer(0, 9).unwrap();
+    pending(&mut vm);
+    let before = (vm.pc(), vm.stack().len_bytes(), vm.pending_system());
+    assert_eq!(
+        dispatch::run(
+            profile.semantics(0x13c),
+            &mut vm,
+            &mut Hosts {
+                device_frame: Some(&mut Pending),
+                ..Default::default()
+            }
+        )
+        .unwrap(),
+        Some(Flow::Wait)
+    );
+    let mut backend = RecordingBackend::default();
+    for answer in [vec![b'x'; 256], b"bad\0comment".to_vec()] {
+        backend.answer_text_dialog(Some(answer));
+        assert!(
+            dispatch::run(
+                profile.semantics(0x13c),
+                &mut vm,
+                &mut Hosts {
+                    device_frame: Some(&mut backend),
+                    ..Default::default()
+                }
+            )
+            .is_err()
+        );
+        assert_eq!(
+            (vm.pc(), vm.stack().len_bytes(), vm.pending_system()),
+            before
+        );
+        assert_eq!(vm.state().system_integer(0), Some(9));
+        assert_eq!(vm.state().string(0), Some(b"unchanged".as_slice()));
+    }
+    for name in ["cmvs-20071117", "cmvs-20080719", "cmvs-20080903"] {
+        let mut wrong = Registry::builtin().profile(name).unwrap().clone();
+        wrong.binaries[0].sha256 = [0; 32];
+        assert!(Registry::parse(&[&wrong.to_text()], "").is_err());
+        assert_eq!(
+            dispatch::run(
+                cmvs_rs::profile::Semantics::Root,
+                &mut vm,
+                &mut Hosts::default()
+            )
+            .unwrap(),
+            None
+        );
     }
 }

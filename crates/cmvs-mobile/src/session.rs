@@ -175,7 +175,7 @@ impl Session {
         startup.set_user_data_directory(&save_dir)?;
         startup.set_decode_movie_frames(true);
         let (mixer, audio_source) = audio::mixer();
-        startup.set_audio_backend(Box::new(cmvs_audio::NativeAudio::with_mixer(&root, mixer)?))?;
+        startup.set_audio_backend(Box::new(cmvs_audio::NativeAudio::from_mixer(&root, mixer)?))?;
         let offset = config.utc_offset_ms;
         startup.set_save_clock(Box::new(move || local_time(offset)));
         startup.set_random_seed(
